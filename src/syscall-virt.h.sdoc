@@ -1,0 +1,15 @@
+XV x86-64 syscall virtualization | Spencer Tipping
+Licensed under the terms of the MIT source code license
+
+Introduction.
+This module provides a set of functions used to rewrite the system calls within
+instruction streams. The API is designed for the normal XV use case, which is
+that you have a source executable somewhere in memory and you're translating
+the code, placing the result elsewhere. For simplicity we only relocate pages
+that consist of code, leaving the data pages untouched.
+
+There are a few issues that come up when we want to move code. Some of them
+are:
+
+| 1. Guarding jumps (need to transform the destination)
+  2. Modifying any addresses specified with %rip displacement

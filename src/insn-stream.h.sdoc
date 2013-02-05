@@ -1,0 +1,21 @@
+XV instruction stream abstraction | Spencer Tipping
+Licensed under the terms of the MIT source code license
+
+Introduction.
+This file defines an instruction stream, which is a convenient abstraction for
+reading and writing whole instructions at a time. It performs automatic
+allocation and stream linking (by generating a jump instruction), and can parse
+instructions up to memory access modes.
+
+There are a few things that aren't handled by instruction streams, mostly
+because there is no need. We generally don't care what the operation is, for
+example. It doesn't matter whether we're moving, comparing, or adding memory;
+any of these operations amounts to a simple read or write and we emit a
+potentially modified Mod/RM, SIB, and displacement.
+
+The interesting cases come up around jump instructions. Immediate-displacement
+jumps like `eb` and `e9` need to be adjusted to accommodate any new
+instructions between the jump and the target. Sometimes this involves resizing
+the jump instruction itself, which is most involved for conditional jumps as
+they have no long-displacement forms. These are the kinds of concerns
+abstracted away by this module.
