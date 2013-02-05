@@ -3,7 +3,7 @@
 `xv` is a Linux process virtualizer that works similarly to `valgrind` but is
 designed to maximize performance. To do this, it rewrites the machine code of
 the process as it is running, replacing certain system call instances with
-calls into userspace.
+calls into userspace. For performance reasons, it does not use `ptrace`.
 
 This transformation will be transparent for the vast majority of programs,
 including those compiled without libc. However, there are certain pathological
@@ -12,23 +12,16 @@ cases in which programs can detect that they are being virtualized:
 1. A program that retrieves the address of the `rip` register can observe that
    the address space has been shifted in memory.
 2. A program whose data structures are executable x86 machine code will incur a
-   performance hit anytime these structures are modified and executed again.
+   performance hit anytime these structures are modified and executed again,
+   and if those data structures contain syscall instructions, their layout will
+   be inconsistent.
 3. Code cache locality is not guaranteed.
 
 ## Usage
 
     xv --module1 --opt=x --opt=y --module2 --opt=z ... command [arguments...]
 
-Some presets, which can be combined using normal short-option syntax:
-
-    $ xv -n ls          # short for xv --no-side-effects ls
-    $ xv -v ls          # short for xv --trace ls
-    $ xv -m ls          # short for xv --memoize ls
-    $ xv -c ls          # short for xv --cow ls
-    $ xv -cv ls         # xv --cow --trace ls
-    $ xv -vc ls         # xv --trace --cow ls (mostly useful for debugging xv)
-
-More detailed examples:
+For example:
 
     $ xv --httpfs cat http://google.com         # like curl http://google.com
     $ xv --cow vim README.md                    # diverges using xvcow.log
@@ -39,6 +32,17 @@ More detailed examples:
 module. Modules themselves are order-sensitive and work like function
 composition; `xv --a --b --c foo` runs `foo` transformed by `c`, then that
 result by `b`, then that result by `a`.
+
+### Presets
+
+Some presets, which can be combined using normal short-option syntax:
+
+    $ xv -n ls          # short for xv --no-side-effects ls
+    $ xv -v ls          # short for xv --trace ls
+    $ xv -m ls          # short for xv --memoize ls
+    $ xv -c ls          # short for xv --cow ls
+    $ xv -cv ls         # xv --cow --trace ls
+    $ xv -vc ls         # xv --trace --cow ls (mostly useful for debugging xv)
 
 ## Filesystem modules
 
