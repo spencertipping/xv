@@ -1,0 +1,38 @@
+XV x86-64 syscall virtualization | Spencer Tipping
+Licensed under the terms of the MIT source code license
+
+Introduction.
+This module provides a set of functions used to rewrite the system calls within
+instruction streams. The API is designed for the normal XV use case, which is
+that you have a source executable somewhere in memory and you're translating
+the code, placing the result elsewhere. For simplicity we only relocate pages
+that consist of code, leaving the data pages untouched.
+
+The following invariants are preserved:
+
+| 1. All pages are either writable or executable, but never both.
+  2. If a page is executable, then all known jump destinations within that page
+     consist of virtualized instruction streams.
+  3. When a writable page is virtualized, its write permission is removed. The
+     result is that no virtualized page is writable.
+  4. Every virtualized page has a currently-mapped source page. Unmapping the
+     source page causes any virtualized derivatives to be unmapped as well.
+  5. All XV-owned memory is mprotected with no permission while user code is
+     running; the only exception is that the segfault handler is read+execute.
+  6. No executable page contains an instruction that crosses a page boundary.
+
+Most of these invariants don't matter for most programs. The hard case happens
+when we have a program that modifies its own code or generates new code on the
+fly. In these cases we need to use page protection to detect the change and
+re-virtualize the page.
+
+There is an edge case in everything above. In certain not-uncommon cases, an
+instruction can cross a page boundary, for instance:
+
+| 48 b8 xx xx | xx xx xx xx xx xx       # movq $xxxx, %rax
+  --- page 1 -+- page 2 ---------
+
+We have as an invariant that no executable page contains an instruction that
+crosses a page boundary, so the virtualized copy of this instruction is placed
+completely within one page. We then have the property that the new page depends
+on two source pages.

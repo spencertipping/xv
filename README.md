@@ -1,5 +1,7 @@
 # `xv`: Execution virtualization
 
+**NOTE: This project is not yet working.**
+
 `xv` is a Linux process virtualizer that works similarly to `valgrind` but is
 designed to maximize performance. To do this, it rewrites the machine code of
 the process as it is running, replacing certain system call instances with
@@ -44,9 +46,11 @@ Some presets, which can be combined using normal short-option syntax:
     $ xv -cv ls         # xv --cow --trace ls
     $ xv -vc ls         # xv --trace --cow ls (mostly useful for debugging xv)
 
-## Filesystem modules
+## Modules
 
-### `httpfs` module
+`xv` standard modules are listed here in alphabetical order.
+
+### `httpfs`
 
 Extends the semantics of `open (2)` to return special file descriptors that
 represent HTTP entities. Any filename that begins with `http://` or `https://`
@@ -64,3 +68,14 @@ three basic ways to do this:
 `--write` specifies which HTTP method to use when committing file changes. The
 entire file must be rewritten, and it always behaves as though `O_CREAT` has
 been specified (since HTTP provides no `lstat (2)` equivalent).
+
+### `no-side-effects`
+
+Prevents a program from causing any persistent side effects by silently
+ignoring the following, each of which can be re-enabled using the option
+specified:
+
+- `--allow-file-io` Writes to files (`open` returns a dummy FD, `mmap` is
+  virtualized)
+- `--allow-socket-io` Network socket opens/sends (`socket` returns dummy FDs,
+  `bind` is nop)

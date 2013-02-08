@@ -19,3 +19,31 @@ instructions between the jump and the target. Sometimes this involves resizing
 the jump instruction itself, which is most involved for conditional jumps as
 they have no long-displacement forms. These are the kinds of concerns
 abstracted away by this module.
+
+#ifndef XV_INSN_STREAM_H
+#define XV_INSN_STREAM_H
+
+#include <cinttypes>
+
+namespace xv {
+
+Data structures.
+Read streams and write streams are different on purpose. When we're reading
+instructions, we need to keep track of the state of %rax so we can optimize
+certain system call cases.
+
+struct x64_insn_reader {
+  uint8_t  *offset;
+  uint64_t rax_state;
+  bool     rax_known;
+};
+
+struct x64_insn_writer {
+
+};
+
+static void init_x64_insn_reader(x64_insn_reader *r);
+
+}
+
+#endif
