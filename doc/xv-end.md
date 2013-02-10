@@ -17,7 +17,7 @@ so we know both its size and location; at that point, the end of the image is
     #ifndef XV_END_H
     #define XV_END_H
 
-    volatile void xv_end_sentinel_1(void) {}
-    volatile void xv_end_sentinel_2(void) {}
+    void xv_end_sentinel_1(void) {}
+    void xv_end_sentinel_2(void) {}
 
     #endif

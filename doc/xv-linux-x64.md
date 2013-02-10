@@ -11,29 +11,23 @@ those headers wouldn't be able to define concrete functions.
 As it is, we can define a stub `_start` function that kicks off to the
 forward-defined `xv_main`, then put `#include` directives after this.
 
-    void xv_main(void *initial_stack);
+    #include <sys/types.h>
+    void xv_main(void);
+    void xv_warp(off_t offset);
     void _start(void) {
-      void *initial_rsp;
-      asm("movq %%rbp, %0;" : "=r"(initial_rsp));
-
-      /* We can't use an absolute jump to force the tail call. If we did, then the
-       * resulting executable might depend on a GOT to be relocatable, and I don't
-       * want to have to rewrite that each time we move XV in memory. The quick
-       * workaround is to save the original stack pointer and hand it to xv_main so
-       * that we have access to the calling context whether GCC converts the tail
-       * call or not. */
-      xv_main(initial_rsp);
+      /* Jump from here straight into the body of the xv_main() function. */
+      xv_warp((off_t) &xv_main - (off_t) &_start);
     }
 
 # Library inclusion
 
 At this point we can load the header files.
 
-    #include <asm/unistd.h>
-
+    #include "xv-x64-defs.h"
+    #include "xv-generic.h"
+    #include "xv-mmap-linux.h"
     #include "xv-x64-linux-syscall.h"
     #include "xv-x64-virt.h"
-    #include "xv-generic.h"
 
 # Main entry point
 
@@ -41,8 +35,10 @@ We need to parse argv, argc, and the environment variables. These will
 ultimately be handed to the subprocess, but only once we've consumed some of
 them.
 
-    void xv_main(void *initial_stack) {
-
+    void xv_main(void) {
+      /* This function is never called, but its body gets jumped into from _start.
+       * Therefore, we inherit its stack verbatim, which is the one given to new
+       * programs by the Linux process loader. */
     }
 
 # End header

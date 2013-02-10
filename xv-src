@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 # 99aeabc9ec7fe80b1b39f5e53dc7e49e      <- self-modifying Perl magic
-# state:  a45754868749991caf433b50b00036b3
-# istate: 1401539e568a1220c303c0069e669bb0
+# state:  cb5e149c840b5aa1f8a942e552c20ab2
+# istate: b3375503c499e35b6a418a6aa4c96bfd
 # id:     887892e1a0662b9c49d5602153516ec8
 
 # This is a self-modifying Perl file. I'm sorry you're viewing the source (it's
@@ -231,8 +231,12 @@ meta::meta('type::state', <<'__');
 meta::configure 'state', inherit => 0, extension => '.pl', trim => 1;
 meta::define_form 'state', \&meta::bootstrap::implementation;
 __
+meta::alias('ee', 'edit sdoc::h::xv-end');
+meta::alias('eg', 'edit sdoc::h::xv-generic');
 meta::alias('el', 'edit sdoc::c::xv-linux-x64');
 meta::alias('els', 'edit sdoc::h::xv-x64-linux-syscall');
+meta::alias('em', 'edit sdoc::h::xv-mmap-t');
+meta::alias('eml', 'edit sdoc::h::xv-mmap-linux');
 meta::alias('erf', 'edit function::render');
 meta::alias('es', 'edit sdoc::h::xv-self');
 meta::alias('ev', 'edit sdoc::h::xv-x64-virt');
@@ -611,7 +615,9 @@ mkdir 'bin' unless -d 'bin';
 my @builds = grep s/^sdoc::c:://, sort keys %data;
 file::write("doc/$_.md", retrieve("markdown::c::$_"), mkpath => 1),
 file::write("src/$_.c",  retrieve("c::$_"),           mkpath => 1),
-sh("gcc -nostdlib -o $_ src/$_.c && cp $_ bin/$_-gcc && ./tinyelf-shrink $_")
+sh("gcc -std=gnu99 -nostdlib -o $_ src/$_.c \\
+    && cp $_ bin/$_-gcc \\
+    && ./tinyelf-shrink $_")
 for @builds;
 __
 meta::function('rm', <<'__');
@@ -1583,36 +1589,32 @@ those headers wouldn't be able to define concrete functions.
 As it is, we can define a stub `_start` function that kicks off to the
 forward-defined `xv_main`, then put `#include` directives after this.
 
-void xv_main(void *initial_stack);
+#include <sys/types.h>
+void xv_main(void);
+void xv_warp(off_t offset);
 void _start(void) {
-  void *initial_rsp;
-  asm("movq %%rbp, %0;" : "=r"(initial_rsp));
-
-  /* We can't use an absolute jump to force the tail call. If we did, then the
-   * resulting executable might depend on a GOT to be relocatable, and I don't
-   * want to have to rewrite that each time we move XV in memory. The quick
-   * workaround is to save the original stack pointer and hand it to xv_main so
-   * that we have access to the calling context whether GCC converts the tail
-   * call or not. */
-  xv_main(initial_rsp);
+  /* Jump from here straight into the body of the xv_main() function. */
+  xv_warp((off_t) &xv_main - (off_t) &_start);
 }
 
 Library inclusion.
 At this point we can load the header files.
 
-#include <asm/unistd.h>
-
+#include "xv-x64-defs.h"
+#include "xv-generic.h"
+#include "xv-mmap-linux.h"
 #include "xv-x64-linux-syscall.h"
 #include "xv-x64-virt.h"
-#include "xv-generic.h"
 
 Main entry point.
 We need to parse argv, argc, and the environment variables. These will
 ultimately be handed to the subprocess, but only once we've consumed some of
 them.
 
-void xv_main(void *initial_stack) {
-  
+void xv_main(void) {
+  /* This function is never called, but its body gets jumped into from _start.
+   * Therefore, we inherit its stack verbatim, which is the one given to new
+   * programs by the Linux process loader. */
 }
 
 End header.
@@ -1641,8 +1643,8 @@ so we know both its size and location; at that point, the end of the image is
 #ifndef XV_END_H
 #define XV_END_H
 
-volatile void xv_end_sentinel_1(void) {}
-volatile void xv_end_sentinel_2(void) {}
+void xv_end_sentinel_1(void) {}
+void xv_end_sentinel_2(void) {}
 
 #endif
 
@@ -1653,21 +1655,105 @@ Licensed under the terms of the MIT source code license
 
 Introduction.
 This is where we do stuff like option parsing, module setup, and utility
-function definitions. XV data structures are defined in xv-self.h.
+function definitions. XV data structures are defined in xv-self.h. We
+forward-declare any system-specific implementation functions needed here.
 
 #ifndef XV_GENERIC_H
 #define XV_GENERIC_H
 
-#ifndef XV_DEFINED_SYSCALL
-#error xv-generic.h requires XV_DEFINED_SYSCALL
-#endif
+#include <stddef.h>
+#include <sys/types.h>
 
 Utility functions.
 Useful utilities that exist one layer above the platform-independent
 abstractions defined by syscall layers.
 
+#define xv_stdin  0
+#define xv_stdout 1
+#define xv_stderr 2
+
+ssize_t xv_puts_(int fd, const void *buf, ssize_t len);
 #define xv_puts(fd, s) xv_puts_(fd, s, sizeof(s))
 #define xv_log(s)      xv_puts(xv_stderr, s)
+
+void xv_exit(int status);
+
+#ifdef NO_ASSERTIONS
+  #define fail_if(cond, msg)
+#else
+  #define fail_if(cond, msg)  \
+    do {                      \
+      if (!(cond)) {          \
+        xv_log("xv error: "); \
+        xv_log(msg);          \
+        xv_log("\n");         \
+        xv_exit(1);           \
+      }                       \
+    } while (0);
+#endif
+
+#endif
+
+__
+meta::sdoc('h::xv-mmap-linux', <<'__');
+XV Linux mmap implementation | Spencer Tipping
+Licensed under the terms of the MIT source code license
+
+#ifndef XV_MMAP_LINUX_H
+#define XV_MMAP_LINUX_H
+
+typedef struct {
+  void*  addr;
+  size_t length;
+  int    prot;
+  int    flags;
+  int    fd;
+  off_t  offset;
+} xv_mmap_args_t;
+
+inline void *xv_mapping_start(xv_mmap_args_t *mapping) {
+  return mapping->addr;
+}
+
+inline size_t xv_mapping_size(xv_mmap_args_t *mapping) {
+  return mapping->length;
+}
+
+#endif
+
+__
+meta::sdoc('h::xv-mmap-t', <<'__');
+XV memory mapping table structure | Spencer Tipping
+Licensed under the terms of the MIT source code license
+
+Introduction.
+Map tables keep track of which pages are mapped into the memory of a process.
+We need to be able to query them in the following ways:
+
+| 1. Which mmap arguments produced the mapping containing address X?
+  2. How much space is there around address X?
+
+We regularly update this structure, so insertions and deletions must each be
+reasonably fast (though not nearly as fast as querying). Another interesting
+aspect is that this structure can't store absolute pointers; instead, it must
+store relative offsets from its base. The reason is that the XV image can move
+in memory arbitrarily at any moment, with the limitations that such movement is
+atomic, and that no such movement will occur from within any function here.
+
+#ifndef XV_MMAP_T_H
+#define XV_MMAP_T_H
+
+#if 0
+/* Forward definitions (actual defs are platform-specific) */
+struct xv_mmap_args_t;
+inline void*  xv_mapping_start(struct xv_mmap_args_t *mapping);
+inline size_t xv_mapping_size (struct xv_mmap_args_t *mapping);
+#endif
+
+Data structure.
+
+typedef struct {
+} xv_mmap_t;
 
 #endif
 
@@ -1687,6 +1773,12 @@ process.
 #define XV_SELF_H
 
 #define XV_DEFINED_SELF
+
+#include <stddef.h>
+#include <stdint.h>
+#include <sys/types.h>
+
+#include "xv-mmap-t.h"
 
 Image structures.
 XV maintains a stack-local indirect pointer to this structure, which is
@@ -1717,39 +1809,99 @@ pointer volatile because any image modifications will occur within the self
 mutex.
 
 typedef struct {
-  ptrdiff_t image_base;                 /* x->self == x */
-  ptrdiff_t image_size;                 /* size of state + functions */
-  long      flags;                      /* current flags */
+  off_t         image_base;             /* x->self == x */
+  size_t        image_size;             /* size of state + functions */
+  volatile long flags;                  /* current flags */
 
-  mmap_t    process_maps;               /* mapped memory of virtual process */
+  xv_mmap_t     self_maps;              /* mapped memory of xv */
+  xv_mmap_t     virtual_maps;           /* mapped memory of virtual process */
 } xv_self_t;
 
 #define xv_set -1
 #define xv_flag(n, flag) (n & (1 << (flag)))
 
 #define xv_flag_handling_signal 0       /* are we handling a signal? */
+#define xv_flag_writelock       1       /* are our pages write-locked? */
+#define xv_flag_relocating      2       /* is this image being relocated? */
 
 Self placement and relocation.
 In order to create the initial `xv_self_t`, we look at the offset of the
 `_start` function (which we are allowed to clobber) and round down to the
 nearest page boundary (4096 bytes on x86).
 
-volatile void xv_end_sentinel_1(void);
-volatile void xv_end_sentinel_2(void);
-xv_self_t *xv_create_self(void) {
-  xv_self_t *self = (xv_self_t*) ((ptrdiff_t) &_start & ~(xv_page_size - 1));
-  ptrdiff_t  end  = (2 * (ptrdiff_t) &xv_end_sentinel_2)
-                  - (ptrdiff_t) &xv_end_sentinel_1;
+void xv_end_sentinel_1(void);
+void xv_end_sentinel_2(void);
 
-  self->image_base = (ptrdiff_t) self;
-  self->image_size = end - self->image_base;
+xv_self_t *xv_create_self(void) {
+  xv_self_t *self = (xv_self_t*) ((off_t) &_start & ~(xv_page_size - 1));
+  off_t      end  = (2 * (off_t) &xv_end_sentinel_2)
+                  - (off_t) &xv_end_sentinel_1;
+
+  self->image_base = (off_t) self;
+  self->image_size = (size_t) (end - self->image_base);
   self->flags      = 0;
   return self;
 }
 
+When you choose to relocate XV, make sure you have the memory reserved already.
+You also need to manually unmap the old image and change the self_t pointer as
+described earlier.
+
+void xv_warp(ptrdiff_t diff);
+
 xv_self_t *xv_self_relocate(xv_self_t *self, void *addr) {
-  
+  fail_if(xv_flag(self->flags, xv_flag_writelock),
+          "cannot relocate a writelocked xv self");
+
+  fail_if(xv_flag(self->flags, xv_flag_relocating),
+          "cannot relocate a self that is already being relocated");
+
+  /* Mark this image as being relocated. An image never loses this flag; we
+   * clear it only on the new image but never remove it from the old one. There
+   * is a period of time during the copy when both images have the flag,
+   * meaning that each one is temporarily invalid. Therefore, this whole
+   * function is a critical section on the image. */
+  self->flags |= xv_flag(xv_set, xv_flag_relocating);
+
+  for (off_t src = self->image_base,
+             dst = (off_t) addr,
+             end = self->image_base + self->image_size;
+       src < end;
+       src += xv_copy_step, dst += xv_copy_step)
+    *(xv_copy_type*)dst = *(xv_copy_type*)src;
+
+  /* Now for the hard part. We need to move execution to the new image location
+   * so that the original can be safely unmapped. To do this, we generate an
+   * indirect jump to the absolute new location of where we are right now. This
+   * can be done easily enough by taking the difference between the images and
+   * computing an %rip-relative address. */
+  xv_self_t *new_self = (xv_self_t*) addr;
+  ptrdiff_t  diff     = (off_t) new_self - (off_t) self;
+
+  /* This is the last thing we do inside the old image. */
+  xv_warp(diff);
+
+  new_self->flags &= ~(xv_flag(xv_set, xv_flag_relocating));
+
+  /* At this point we still have stack references to the old image, but we are
+   * executing inside the new one. All we need to do is return the new image
+   * and assume that the caller will update the self_t pointers. */
+  return new_self;
 }
+
+#endif
+
+__
+meta::sdoc('h::xv-x64-defs', <<'__');
+XV x86-64 definitions | Spencer Tipping
+Licensed under the terms of the MIT source code license
+
+#ifndef XV_X64_DEFS_H
+#define XV_X64_DEFS_H
+
+#define xv_copy_type uint64_t
+#define xv_copy_step sizeof(xv_copy_type)
+#define xv_page_size 4096
 
 #endif
 
@@ -1768,19 +1920,22 @@ macros for it.
 
 #define XV_SYSCALLS_DEFINED
 
-#include <stdint.h>
-#include <asm/types.h>
 #include <asm/unistd.h>
+#include <sys/types.h>
+#include <stdint.h>
+#include <ucontext.h>
+
+#include "xv-self.h"
 
 int64_t xv_syscall6(int64_t n, int64_t a, int64_t b, int64_t c,
                                int64_t d, int64_t e, int64_t f) {
-  asm volatile ("movq %3, %%r10;"
-                "movq %4, %%r8;"
-                "movq %5, %%r9;"
-                "syscall;"
-              : "=a"(n)
-              : "a"(n), "D"(a), "S"(b), "d"(c), "r"(d), "r"(e), "r"(f)
-              : "%r10", "%r8", "%r9", "%rcx");
+  asm ("movq %3, %%r10;"
+       "movq %4, %%r8;"
+       "movq %5, %%r9;"
+       "syscall;"
+     : "=a"(n)
+     : "a"(n), "D"(a), "S"(b), "d"(c), "r"(d), "r"(e), "r"(f)
+     : "%r10", "%r8", "%r9", "%rcx");
   return n;
 }
 
@@ -1791,16 +1946,30 @@ int64_t xv_syscall6(int64_t n, int64_t a, int64_t b, int64_t c,
 #define xv_syscall1(n,a)         xv_syscall2(n,a,0)
 #define xv_syscall0(n)           xv_syscall1(n,0)
 
-#define xv_stdin  0
-#define xv_stdout 1
-#define xv_stderr 2
+Syscall forwarding.
+The virtualization module creates illegal instructions that we then detect as
+SIGILL signals. The context of the illegal instruction can be used to make the
+syscall that was originally intended.
+
+This function must always be called against an unlocked XV self.
+
+void *xv_forward_syscall(xv_self_t *self, ucontext_t *context) {
+  fail_if(xv_flag(self->flags, xv_flag_writelock),
+          "xv_forward_syscall called against writelocked self");
+
+  
+}
 
 Utility functions.
 These are tied to the syscall interface and are likely to change between
 operating systems.
 
+void xv_exit(int status) {
+  xv_syscall1(__NR_exit, status);
+}
+
 ssize_t xv_puts_(int fd, const void *buf, ssize_t len) {
-  xv_syscall3(__NR_write, fd, buf, len);
+  return xv_syscall3(__NR_write, fd, buf, len);
 }
 
 #endif
@@ -1821,13 +1990,28 @@ dynamically-generated code from generating unmanaged system calls.
 
 #define XV_DEFINED_VIRT
 
-#define xv_page_size 4096       /* this is the case for all x86-64 cpus */
+void xv_warp(ptrdiff_t offset) {
+  asm volatile ("lea 5(%%rip), %%r8;"   /* 5 = combined length of ... */
+                "add %0, %%r8;"         /* [REX] [1-byte opcode] [ModR/M] */
+                "jmp *%%r8;"            /* [ff] [/4] */
+              :
+              : "r"(offset)
+              : "%r8", "cc");
+}
+
+void xv_goto(void* addr) {
+  asm volatile ("jmp *%0;"
+              :
+              : "r"(addr));
+}
 
 Virtualizer.
 This is actually pretty simple. Each of the syscall instructions on x86-64 is
 two bytes long, and we can easily construct a two-byte instruction that is
 totally invalid. The only tricky part is keeping track of the address space
 state.
+
+#endif
 
 __
 internal::main();

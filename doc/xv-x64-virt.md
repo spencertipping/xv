@@ -13,7 +13,19 @@ dynamically-generated code from generating unmanaged system calls.
 
     #define XV_DEFINED_VIRT
 
-    #define xv_page_size 4096       /* this is the case for all x86-64 cpus */
+    void xv_warp(ptrdiff_t offset) {
+      asm volatile ("lea (%0,%%rip,1), %0;"
+                    "jmp *%0;"
+                  :
+                  : "r"(offset)
+                  : "cc");
+    }
+
+    void xv_goto(void* addr) {
+      asm volatile ("jmp *%0;"
+                  :
+                  : "r"(addr));
+    }
 
 # Virtualizer
 
@@ -21,3 +33,5 @@ This is actually pretty simple. Each of the syscall instructions on x86-64 is
 two bytes long, and we can easily construct a two-byte instruction that is
 totally invalid. The only tricky part is keeping track of the address space
 state.
+
+    #endif
