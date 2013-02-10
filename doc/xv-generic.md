@@ -31,14 +31,17 @@ abstractions defined by syscall layers.
     #ifdef NO_ASSERTIONS
       #define fail_if(cond, msg)
     #else
-      #define fail_if(cond, msg)  \
-        do {                      \
-          if (!(cond)) {          \
-            xv_log("xv error: "); \
-            xv_log(msg);          \
-            xv_log("\n");         \
-            xv_exit(1);           \
-          }                       \
+      #define fail_if(cond, msg)              \
+        do {                                  \
+          const char header[] = "xv error: "; \
+          const char message[] = (msg);       \
+          const char newline[] = "\n";        \
+          if (!(cond)) {                      \
+            xv_log(header);                   \
+            xv_log(message);                  \
+            xv_log(newline);                  \
+            xv_exit(1);                       \
+          }                                   \
         } while (0);
     #endif
 

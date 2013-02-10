@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 # 99aeabc9ec7fe80b1b39f5e53dc7e49e      <- self-modifying Perl magic
-# state:  cb5e149c840b5aa1f8a942e552c20ab2
-# istate: b3375503c499e35b6a418a6aa4c96bfd
+# state:  f2e0b16eb1c3a246b288a21ad5e39509
+# istate: 93a2994dbb24910b8aa88cfd4196049e
 # id:     887892e1a0662b9c49d5602153516ec8
 
 # This is a self-modifying Perl file. I'm sorry you're viewing the source (it's
@@ -1593,8 +1593,7 @@ forward-defined `xv_main`, then put `#include` directives after this.
 void xv_main(void);
 void xv_warp(off_t offset);
 void _start(void) {
-  /* Jump from here straight into the body of the xv_main() function. */
-  xv_warp((off_t) &xv_main - (off_t) &_start);
+  xv_main();
 }
 
 Library inclusion.
@@ -1612,9 +1611,9 @@ ultimately be handed to the subprocess, but only once we've consumed some of
 them.
 
 void xv_main(void) {
-  /* This function is never called, but its body gets jumped into from _start.
-   * Therefore, we inherit its stack verbatim, which is the one given to new
-   * programs by the Linux process loader. */
+  asm("leave");         /* remove stack frame created by _start */
+  xv_log("exiting at end of xv_main");
+  xv_exit(0);
 }
 
 End header.
@@ -1681,14 +1680,17 @@ void xv_exit(int status);
 #ifdef NO_ASSERTIONS
   #define fail_if(cond, msg)
 #else
-  #define fail_if(cond, msg)  \
-    do {                      \
-      if (!(cond)) {          \
-        xv_log("xv error: "); \
-        xv_log(msg);          \
-        xv_log("\n");         \
-        xv_exit(1);           \
-      }                       \
+  #define fail_if(cond, msg)              \
+    do {                                  \
+      const char header[] = "xv error: "; \
+      const char message[] = (msg);       \
+      const char newline[] = "\n";        \
+      if (!(cond)) {                      \
+        xv_log(header);                   \
+        xv_log(message);                  \
+        xv_log(newline);                  \
+        xv_exit(1);                       \
+      }                                   \
     } while (0);
 #endif
 

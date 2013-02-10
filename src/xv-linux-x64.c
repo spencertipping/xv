@@ -14,8 +14,7 @@
 void xv_main(void);
 void xv_warp(off_t offset);
 void _start(void) {
-  /* Jump from here straight into the body of the xv_main() function. */
-  xv_warp((off_t) &xv_main - (off_t) &_start);
+  xv_main();
 }
 
 /* Library inclusion. */
@@ -33,9 +32,9 @@ void _start(void) {
 /* them. */
 
 void xv_main(void) {
-  /* This function is never called, but its body gets jumped into from _start.
-   * Therefore, we inherit its stack verbatim, which is the one given to new
-   * programs by the Linux process loader. */
+  asm("leave");         /* remove stack frame created by _start */
+  xv_log("exiting at end of xv_main");
+  xv_exit(0);
 }
 
 /* End header. */
