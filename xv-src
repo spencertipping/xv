@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 # 99aeabc9ec7fe80b1b39f5e53dc7e49e      <- self-modifying Perl magic
-# state:  5d2a17bb483ae7335895fdeeb671c433
-# istate: 8ff6149f8a207b8e27f05bdb3bda7550
+# state:  946f921883da113c984c4bb820b49714
+# istate: 5207b012f4f06704e64a476f7ce87670
 # id:     c3c7cd981a0119ba136f26e1119c083a
 
 # This is a self-modifying Perl file. I'm sorry you're viewing the source (it's
@@ -2250,10 +2250,10 @@ XV process virtualizer (Linux/x86-64) | Spencer Tipping
 Licensed under the terms of the MIT source code license
 
 ::image-begin
-- pinclude sdoc::binary::elf-x64
-- pinclude sdoc::binary::linux-x64-syscalls
-- pinclude sdoc::binary::virt-x64
-- pinclude sdoc::binary::main-x64
+- pinclude pp::sdoc::binary::elf-x64
+- pinclude pp::sdoc::binary::linux-x64-syscalls
+- pinclude pp::sdoc::binary::virt-x64
+- pinclude pp::sdoc::binary::main-x64
 ::image-end
 
 __
