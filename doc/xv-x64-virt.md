@@ -14,11 +14,12 @@ dynamically-generated code from generating unmanaged system calls.
     #define XV_DEFINED_VIRT
 
     void xv_warp(ptrdiff_t offset) {
-      asm volatile ("lea (%0,%%rip,1), %0;"
-                    "jmp *%0;"
+      asm volatile ("lea 5(%%rip), %%r8;"   /* 5 = combined length of ... */
+                    "add %0, %%r8;"         /* [REX] [1-byte opcode] [ModR/M] */
+                    "jmp *%%r8;"            /* [ff] [/4] */
                   :
                   : "r"(offset)
-                  : "cc");
+                  : "%r8", "cc");
     }
 
     void xv_goto(void* addr) {
