@@ -1,81 +1,73 @@
-# `xv`: Execution virtualization
-
-**NOTE: This project is not yet working.**
-
-`xv` is a Linux process virtualizer that works similarly to `valgrind` but is
-designed to maximize performance. To do this, it rewrites the machine code of
-the process as it is running, replacing certain system call instances with
-calls into userspace. For performance reasons, it does not use `ptrace`.
-
-This transformation will be transparent for the vast majority of programs,
-including those compiled without libc. However, there are certain pathological
-cases in which programs can detect that they are being virtualized:
-
-1. A program that retrieves the address of the `rip` register can observe that
-   the address space has been shifted in memory.
-2. A program whose data structures are executable x86 machine code will incur a
-   performance hit anytime these structures are modified and executed again,
-   and if those data structures contain syscall instructions, their layout will
-   be inconsistent.
-3. Code cache locality is not guaranteed.
+# `xv`: Executable virtualization
+`xv` is a process-level virtualizer for Linux/x86-64. It runs unmodified
+binaries without root, intercepting and reinterpreting system calls. Most
+programs will not detect `xv`, nor will they escape virtualization, even
+through things like JIT. However, pathological cases can escape, so `xv` is not
+a safe way to run untrusted code.
 
 ## Usage
-
-    xv --module1 --opt=x --opt=y --module2 --opt=z ... command [arguments...]
+```
+xv [-m|-r|-v|...] command [args...]
+```
 
 For example:
 
-    $ xv --httpfs cat http://google.com         # like curl http://google.com
-    $ xv --cow vim README.md                    # diverges using xvcow.log
-    $ xv --cow --log=foo.log vim README.md      # diverges using foo.log
-    $ xv --trace find                           # show syscalls (like strace)
+```sh
+$ xv -m ls.log ls               # m = memoize execution of ls
+foo  bar
+$ rm foo bar
+$ xv -r ls.log ls               # r = replay execution
+foo  bar
+$
+```
 
-`xv` is sensitive to argument order; options parameterize the most recent
-module. Modules themselves are order-sensitive and work like function
-composition; `xv --a --b --c foo` runs `foo` transformed by `c`, then that
-result by `b`, then that result by `a`.
+`xv` supports other options too; see `xv (1)` for the complete list.
 
-### Presets
+## Virtualization internals
+`xv` reimplements the Linux ELF loader and process-level memory mapping,
+intercepting segfaults to transform code on-demand. In this case the code is
+transformed in-place by rewriting all system call instructions into illegal
+instructions of the same size:
 
-Some presets, which can be combined using normal short-option syntax:
+```s
+...
+movb $1, %rax
+syscall             # xv changes this to lea (%rax), %rax
+sysenter            # same here
+int $0x80           # same here
+...
+```
 
-    $ xv -n ls          # short for xv --no-side-effects ls
-    $ xv -v ls          # short for xv --trace ls
-    $ xv -m ls          # short for xv --memoize ls
-    $ xv -c ls          # short for xv --cow ls
-    $ xv -cv ls         # xv --cow --trace ls
-    $ xv -vc ls         # xv --trace --cow ls (mostly useful for debugging xv)
+As a result, the process will receive SIGILL when it attempts to make a system
+call. `xv` traps this signal, reading the user context and emulating the
+syscall (or passing it straight through).
 
-## Modules
+Code rewriting happens lazily, since mechanisms like JIT will defeat an
+ahead-of-time rewriting pass. `xv` does this by removing the execute permission
+from all mapped memory pages, causing a segfault as soon as execution begins.
+At this point we can observe the address that caused the fault, which gives us
+a base offset to rewrite things. `xv` then rewrites all statically-reachable
+code, transforming any syscalls into illegal instructions. Any rewritten page
+is set as executable, and the process continues. If there is any overlapping
+code (a pathological case), `xv` throws an error and exits.
 
-`xv` standard modules are listed here in alphabetical order.
+`xv` preserves the invariant that no page is writable and executable at the
+same time. This mostly prevents the program from escaping virtualization
+through self-modifying code, though there are still some loopholes. For
+example, the program could map the same file into two separate addresses, using
+one region for writing and the other for execution. It could then undo `xv`'s
+transformations, allowing it to run system calls normally. For this reason,
+`xv` should not be used to run untrusted programs.
 
-### `httpfs`
+Because `xv`'s own memory shares an address space with the virtualized process,
+`xv` manages its pages by maintaining a further invariant: anytime it runs code
+that belongs to the virtualized process, all but one of its pages have no
+permissions. The remaining page contains the signal handlers and a pointer to
+the other pages (which always exist in a contiguous region).
 
-Extends the semantics of `open (2)` to return special file descriptors that
-represent HTTP entities. Any filename that begins with `http://` or `https://`
-is handled; all others are passed through to the existing `open` handler.
-
-Obviously HTTP as such doesn't have much hope of being POSIX-compliant, and
-`httpfs` doesn't make any effort to change that. Its primary utility is to
-provide basic read/write functionality for HTTP-loaded resources. There are
-three basic ways to do this:
-
-    --write=none (default)
-    --write=post
-    --write=put
-
-`--write` specifies which HTTP method to use when committing file changes. The
-entire file must be rewritten, and it always behaves as though `O_CREAT` has
-been specified (since HTTP provides no `lstat (2)` equivalent).
-
-### `no-side-effects`
-
-Prevents a program from causing any persistent side effects by silently
-ignoring the following, each of which can be re-enabled using the option
-specified:
-
-- `--allow-file-io` Writes to files (`open` returns a dummy FD, `mmap` is
-  virtualized)
-- `--allow-socket-io` Network socket opens/sends (`socket` returns dummy FDs,
-  `bind` is nop)
+### Issues
+`xv`'s in-place code transformation breaks in some interesting ways when the
+process maps an executable file in SHARED mode. The problem is that we end up
+committing `xv`'s code changes to disk, making the resulting file impossible to
+execute due to SIGILL and other errors. (Alternatively, if the user can't write
+to the file, then the mapping request will fail altogether.)
