@@ -71,3 +71,7 @@ process maps an executable file in SHARED mode. The problem is that we end up
 committing `xv`'s code changes to disk, making the resulting file impossible to
 execute due to SIGILL and other errors. (Alternatively, if the user can't write
 to the file, then the mapping request will fail altogether.)
+
+In our case, the workaround is to map the file in PRIVATE mode. This eliminates
+our ability to modify the resulting file, which should pose a problem only in
+very strange cases.
