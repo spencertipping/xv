@@ -65,6 +65,16 @@ that belongs to the virtualized process, all but one of its pages have no
 permissions. The remaining page contains the signal handlers and a pointer to
 the other pages (which always exist in a contiguous region).
 
+### Runtime performance impact
+Most programs have clearly-separated code and data, so xv's code rewriting
+won't impose much overhead. Instead, performance will be lost during each
+system call, which for most programs will cause much less overhead than using a
+FUSE filesystem.
+
+Additionally, `xv` performs a single-pass transformation of all code when the
+program starts; for most libc-linked executables, this pass is just a read
+followed by a few changes to some libc functions.
+
 ### Issues
 `xv`'s in-place code transformation breaks in some interesting ways when the
 process maps an executable file in SHARED mode. The problem is that we end up
