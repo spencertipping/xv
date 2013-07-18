@@ -106,8 +106,17 @@ typedef struct {
   unsigned int i      : 3;
   unsigned int b      : 3;
 
-  int64_t      disp;            /* up to 64-bit displacement */
-  int64_t      imm;             /* up to 64-bit immediate */
+  union {
+    int64_t disp64;
+    int32_t disp32;
+    int8_t  disp8;
+  };
+
+  union {
+    int64_t imm64;
+    int32_t imm32;
+    int8_t  imm8;
+  };
 } xv_x64_insn;
 
 Operand encodings.
