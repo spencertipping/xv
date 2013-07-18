@@ -1,0 +1,148 @@
+XV instruction stream rewriter: x86-64
+Copyright (C) 2013, Spencer Tipping
+Released under the terms of the GPLv3: http://www.gnu.org/licenses/gpl-3.0.txt
+
+Introduction.
+Implementations of most of the functions in xv-x64.h; see also xv-x64.s for the
+assembly-language syscall intercept.
+
+#include "xv-x64.h"
+
+#include <errno.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/types.h>
+
+Instruction buffer boilerplate.
+All of the interesting stuff is further below.
+
+#define xv_allocate_ibuffer_space(capacity) \
+  mmap(NULL, \
+       (capacity), \
+       PROT_READ | PROT_WRITE | PROT_EXEC, \
+       MAP_PRIVATE | MAP_ANONYMOUS, \
+       -1, \
+       0)
+
+int xv_ibuffer_init(xv_x64_ibuffer* const buf) {
+  int   const page_size = getpagesize();
+  void* const region    = xv_allocate_ibuffer_space(page_size);
+
+  if (region == (void*) -1)
+    return errno;
+
+  buf->start = buf->current = (xv_x64_iptr) region;
+  buf->capacity             = page_size;
+  return 0;
+}
+
+int xv_ibuffer_free(xv_x64_ibuffer* const buf) {
+  if (buf->start && munmap(buf->start, buf->capacity))
+    return errno;
+
+  buf->start = buf->current = NULL;
+  buf->capacity             = 0;
+  return 0;
+}
+
+int xv_write_insn(xv_x64_ibuffer*   const buf,
+                  xv_x64_const_iptr const insn,
+                  ssize_t           const size) {
+  ssize_t const new_size = (off_t) buf->current
+                         - (off_t) buf->start
+                         + size;
+
+  /* Note: we're given that buf->capacity is already a multiple of the page
+   * size, so new_capacity is also. */
+  ssize_t new_capacity = buf->capacity;
+  while ((new_capacity <<= 1) < new_size);
+
+  int err;
+  if (new_size > buf->capacity) {
+    /* Reallocate if possible. Otherwise leave the original structure
+     * unmodified and bail. */
+    void* const region = xv_allocate_ibuffer_space(new_capacity);
+    if (region == (void*) -1)
+      return errno;
+
+    memcpy(region, buf->start, (off_t) buf->current - (off_t) buf->start);
+    if (err = munmap(buf->start, buf->capacity)) {
+      /* Can't unmap old buffer for some reason, so free our new memory and
+       * bail. If we can't unmap new memory, we're totally screwed. */
+      int const errno_orig = errno;
+      munmap(region, new_capacity);
+      return errno_orig;
+    }
+
+    buf->current += (off_t) region - (off_t) buf->start;
+    buf->start    = region;
+    buf->capacity = new_capacity;
+  }
+
+  memcpy(buf->current, insn, size);
+  buf->current += size;
+
+  return 0;
+}
+
+Instruction rewriter.
+This is where the fun stuff happens. This function steps a rewriter forward by
+one instruction, returning a status code to indicate what should happen next.
+
+#define check_end \
+  do { \
+    if (rw.src >= rw.end) return XV_STEP_END; \
+  } while (0);
+
+int xv_step_rw(xv_x64_rewriter* const shared_rw) {
+  /* Make all local changes to our own copy. This lets us easily back out if we
+   * hit errors. */
+  xv_x64_rewriter   rw     = *shared_rw;
+  xv_x64_const_iptr istart =  shared_rw->src;
+
+  int address_size_prefix = 0;
+
+  /* Parse out all prefixes. Rewriting is closed under instruction prefixes,
+   * with the exception of address size (0x67). */
+  for (int prefix_1_seen = 0, prefix_2_seen = 0, g1p, g2p,
+           prefix_3_seen = 0, prefix_4_seen = 0, g3p, g4p;
+       rw.src < rw.end &&
+         (prefix_1_seen ^ (g1p |= XV_G1P(rw.src)) ||
+          prefix_2_seen ^ (g2p |= XV_G2P(rw.src)) ||
+          prefix_3_seen ^ (g3p |= XV_G3P(rw.src)) ||
+          prefix_4_seen ^ (g4p |= XV_G4P(rw.src)));
+       ++rw.src,
+       prefix_1_seen = g1p, prefix_2_seen = g2p,
+       prefix_3_seen = g3p, prefix_4_seen = g4p)
+    address_size_prefix = prefix_3_seen;
+
+  check_end;
+
+  /* Now we're past the regular prefixes, but we may have a REX byte. */
+  xv_x64_const_iptr const rex =
+    XV_REXP(rw.src) ? rw.src++ : NULL;
+
+  xv_x64_const_iptr const vex3 =
+    !rex && XV_VEX3P(rw.src) ? (rw.src += 3) - 3 : NULL;
+
+  xv_x64_const_iptr const vex2 =
+    !rex && !vex3 && XV_VEX2P(rw.src) ? (rw.src += 2) - 2 : NULL;
+
+  check_end;
+
+  /* Now we can parse the opcode. */
+  xv_x64_const_iptr const opesc1 = XV_OPESC1P(rw.src) ? rw.src++ : NULL;
+  check_end;
+
+  xv_x64_const_iptr const opesc2 =
+    opesc1 && XV_OPESC2P(rw.src) ? rw.src++ : NULL;
+
+  xv_x64_const_iptr const op = rw.src++;
+
+  /* Figure out what kind of addressing mode we're using and parse the
+   * remaining bytes. */
+
+}
+
+#undef check_end

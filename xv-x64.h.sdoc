@@ -1,0 +1,233 @@
+XV instruction stream rewriter: x86-64
+Copyright (C) 2013, Spencer Tipping
+Released under the terms of the GPLv3: http://www.gnu.org/licenses/gpl-3.0.txt
+
+Introduction.
+This file provides all definitions relevant to instruction stream rewriting for
+x86-64 instructions. It assumes that the instruction stream is being
+interpreted in 64-bit mode, not 32-bit compatibility mode.
+
+#ifndef XV_X64_H
+#define XV_X64_H
+
+#include "xv.h"
+
+#include <elf.h>
+#include <stdint.h>
+#include <sys/types.h>
+
+Rewriting strategy.
+Rewriting is a closed transformation: i.e. there is no runtime interaction that
+needs to happen to maintain the abstraction. The only exception is runtime code
+generation, which is detected by listening for segfaults against the
+write-protected original code. (Any such segfault invalidates the cached
+basic-blocks that refer to it.)
+
+Internally, the transformation consists of rewriting the code to preserve the
+invariant that all addressing logic is done using unmodified addresses. For
+absolute addresses this is trivial, and for %rip-relative addressing it means
+adjusting (or adding) the displacement for each memory-accessing instruction.
+
+Syscall opcodes, of which there are three, are each rewritten as calls into
+libxv. These calls aren't standard C calls; they're literally x86-64 CALL
+instructions that go to a receiver site in libxv. This receiver site then reads
+the relevant registers and performs or emulates the system call itself.
+
+typedef unsigned char       *xv_x64_iptr;
+typedef unsigned char const *xv_x64_const_iptr;
+
+typedef struct {
+  xv_x64_iptr start;                    /* start of allocated region */
+  xv_x64_iptr current;                  /* current insertion point */
+  ssize_t     capacity;                 /* size (bytes) of allocated region */
+} xv_x64_ibuffer;
+
+typedef struct {
+  xv_x64_const_iptr src;                /* original instruction stream */
+  xv_x64_const_iptr end;                /* end of source data */
+  xv_x64_ibuffer    dst;                /* recompiled instruction stream */
+  xv_x64_iptr       xv_entry_point;     /* system call hook address */
+} xv_x64_rewriter;
+
+int xv_ibuffer_init(xv_x64_ibuffer* const buf);
+int xv_ibuffer_free(xv_x64_ibuffer* const buf);
+
+/* Write a single literal instruction into the specified buffer, resizing
+ * backing allocation structures as necessary */
+int xv_write_insn(xv_x64_ibuffer*   const buf,
+                  xv_x64_const_iptr const insn,
+                  ssize_t           const size);
+
+/* Rewrite a single instruction from src to dst, updating both */
+int xv_step_rw(xv_x64_rewriter* const rw);
+
+/* Possible values for xv_step_rw return: */
+#define XV_STEP_ERR  -1 /* something went wrong; read errno for details */
+#define XV_STEP_CONT 0  /* basic block continues */
+#define XV_STEP_UJMP 1  /* basic block ended with unconditional jump */
+#define XV_STEP_CJMP 2  /* basic block ended with conditional jump */
+#define XV_STEP_END  3  /* we hit the end of declared basic block (illegal) */
+
+Instruction metadata.
+Instruction argument encodings indexed by key, which in this case is a ten-bit
+quantity that indicates the opcode escape path:
+
+| 00 xxxxxxxx   <- one-byte opcode xxxxxxxx
+  01 xxxxxxxx   <- two-byte opcode xxxxxxxx
+  10 xxxxxxxx   <- three-byte opcode escaped with 0x38
+  11 xxxxxxxx   <- three-byte opcode escaped with 0x3a
+
+There are also a bunch of predicate macros to check for prefix, REX, VEX, and
+other types of bytes. These take an xv_x64_iptr or xv_x64_const_iptr and return
+0 or 1.
+
+typedef struct {
+  unsigned int p1 : 2;
+  unsigned int p2 : 3;
+  unsigned int p3 : 1;
+  unsigned int p4 : 1;
+  unsigned int    : 1;
+
+  unsigned int rex    : 4;      /* for VEX, stores WRXB */
+  unsigned int vex_v4 : 4;
+  unsigned int vex_m5 : 5;
+  unsigned int vex_l  : 1;
+  unsigned int vex_pp : 2;
+
+  unsigned int escape   : 2;
+  unsigned int          : 2;
+  unsigned int encoding : 4;    /* derived from opcode and prefixes */
+
+  unsigned int opcode : 8;
+  unsigned int mod    : 2;
+  unsigned int modr   : 3;
+  unsigned int modm   : 3;
+  unsigned int s      : 2;
+  unsigned int i      : 3;
+  unsigned int b      : 3;
+
+  int64_t      disp;            /* up to 64-bit displacement */
+  int64_t      imm;             /* up to 64-bit immediate */
+} xv_x64_insn;
+
+Operand encodings.
+These are used for two purposes. First, we need them to indicate the length of
+the remainder of the instruction; and second, we need to figure out how memory
+is accessed and change the ModR/M and SIB bytes for %rip-relative instructions.
+
+#define XV_OPA_NONE   0         /* no-arg insn, e.g. CLD */
+#define XV_OPA_DIRECT 1         /* direct address, "A" in Intel opcode table */
+#define XV_OPA_MODRM  2         /* ModR/M determines reg/mem access ("E") */
+#define XV_OPA_I8     3         /* immediate single-byte absolute, e.g. INT */
+#define XV_OPA_D8     4         /* immediate single-byte relative, e.g. JMP */
+#define XV_OPA_I32    5         /* immediate 4-byte absolute */
+#define XV_OPA_D32    6         /* immediate 4-byte relative */
+#define XV_OPA_
+
+#define XV_INSN_ESC0   0        /* xv_x64_insn.escape */
+#define XV_INSN_ESC1   1
+#define XV_INSN_ESC238 2
+#define XV_INSN_ESC23A 3
+
+#define XV_INSN_LOCK  1         /* xv_x64_insn.p1 */
+#define XV_INSN_REPNZ 2
+#define XV_INSN_REPZ  3
+
+#define XV_INSN_CS 1            /* xv_x64_insn.p2 */
+#define XV_INSN_SS 2            /* note that CS == branch not taken, */
+#define XV_INSN_DS 3            /*           DS == branch taken */
+#define XV_INSN_ES 4
+#define XV_INSN_FS 5
+#define XV_INSN_GS 6
+
+#define XV_INSN_66 1            /* xv_x64_insn.p3 */
+
+#define XV_INSN_67 1            /* xv_x64_insn.p4 */
+
+Prefix detectors.
+These are used against xv_x64_const_iptrs to figure out what kind of
+instruction you have. (See xv-x64.c for details.)
+
+#define XV_G1P(iptr) (*(iptr) == 0xf0 || \
+                      *(iptr) == 0xf2 || \
+                      *(iptr) == 0xf3)
+
+#define XV_G2P(iptr) (*(iptr) == 0x2e || *(iptr) == 0x36 || \
+                      *(iptr) == 0x3e || *(iptr) == 0x26 || \
+                      *(iptr) == 0x64 || *(iptr) == 0x65)
+
+#define XV_G3P(iptr) (*(iptr) == 0x66)
+#define XV_G4P(iptr) (*(iptr) == 0x67)
+
+#define XV_REXP(iptr)  ((*(iptr) & 0xf0) == 0x40)
+#define XV_VEX3P(iptr) (*(iptr) == 0xc4)
+#define XV_VEX2P(iptr) (*(iptr) == 0xc5)
+
+#define XV_OPESC1P(iptr) (*(iptr) == 0x0f)
+#define XV_OPESC2P(iptr) (*(iptr) == 0x38 || *(iptr) == 0x3a)
+
+Basic blocks.
+Each basic block knows the translation address, and basic blocks are stored in
+a sorted structure so we can trace segfault addresses back to the corresponding
+piece of code. (This will happen anytime the code attempts to modify itself.)
+
+In addition, basic blocks provide flags, which indicate various possibly-useful
+properties. For example, we mark any basic block that doesn't have any
+memory-writing operations, and we mark those that make no system calls.
+
+We also need to keep track of the kind of jump the block uses. Each basic block
+will end for a specific reason, often because we encountered a jump
+instruction. We store the type of ending on the basic block so we can recover
+the target address without reparsing it.
+
+#define XV_NO_SYS   (1 << 0)    /* the basic block makes no system calls */
+#define XV_NO_WRITE (1 << 1)    /* the basic block does not write to memory */
+
+typedef struct {
+  xv_x64_const_iptr addr;       /* starting absolute address */
+  ssize_t           size;       /* size (bytes) of original */
+  xv_x64_const_iptr end_insn;   /* beginning of jump instruction (0 if none) */
+  xv_x64_const_iptr t_addr;     /* translation cache address (0 if none) */
+  uint64_t          flags;      /* see above for values */
+} xv_x64_bblock;
+
+typedef struct {
+  xv_x64_bblock *blocks;        /* array of blocks, always sorted by addr */
+  int            size;          /* number of used block entries */
+  int            capacity;      /* total number of block entries */
+} xv_x64_bblock_list;
+
+int xv_bblock_list_init(xv_x64_bblock_list* const bblock_list);
+int xv_bblock_list_free(xv_x64_bblock_list* const bblock_list);
+
+/* Return index of basic block containing specified addr, -1 if none; runs in
+ * O(log n) time */
+int xv_bblock_idx(xv_x64_const_iptr         const addr,
+                  const xv_x64_bblock_list* const bblock_list);
+
+/* Add bblock to list, maintaining sort order; runs in O(n) time */
+int xv_add_bblock(xv_x64_bblock const* const bblock,
+                  xv_x64_bblock_list*  const bblock_list);
+
+/* Rewrite jump target addresses within specified bblock, causing code to jump
+ * directly to other already-rewritten basic blocks rather than into
+ * untranslated code (which would cause a segfault that we would intercept) */
+int xv_link_bblock(xv_x64_bblock_list* const bblock_list,
+                   int                 const idx);
+
+ELF reader.
+All of the machine code coming into the rewriter is probably going to be
+encased in ELF objects. This is useful for us because we can easily map the ELF
+into memory, then use the symbol table to build a list of basic blocks.
+
+Some (admittedly rare and bizarre) ELF objects have invalid symbol tables or
+other such nonsense. In this case, we can use the entry point (for
+executables), or we can wait for code to be executed and catch the resulting
+segfault, having then discovered the address of a basic block or fragment.
+
+/* Add all basic blocks from in-memory ELF image; idempotent, and runs in
+ * O((k + n)²) time, where k = #bblocks in ELF and n = size of bblock list */
+int xv_elf_into_bblocks(const void*         const elf_image,
+                        xv_x64_bblock_list* const bblock_list);
+
+#endif
