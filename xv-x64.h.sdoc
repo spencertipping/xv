@@ -33,40 +33,55 @@ libxv. These calls aren't standard C calls; they're literally x86-64 CALL
 instructions that go to a receiver site in libxv. This receiver site then reads
 the relevant registers and performs or emulates the system call itself.
 
-typedef unsigned char       *xv_x64_iptr;
-typedef unsigned char const *xv_x64_const_iptr;
+typedef unsigned char       xv_x64_i;
+typedef unsigned char const xv_x64_const_i;
 
 typedef struct {
-  xv_x64_iptr start;                    /* start of allocated region */
-  xv_x64_iptr current;                  /* current insertion point */
-  ssize_t     capacity;                 /* size (bytes) of allocated region */
+  xv_x64_i *start;                      /* start of allocated region */
+  xv_x64_i *current;                    /* current insertion point */
+  ssize_t   capacity;                   /* size (bytes) of allocated region */
 } xv_x64_ibuffer;
 
 typedef struct {
-  xv_x64_const_iptr src;                /* original instruction stream */
-  xv_x64_const_iptr end;                /* end of source data */
-  xv_x64_ibuffer    dst;                /* recompiled instruction stream */
-  xv_x64_iptr       xv_entry_point;     /* system call hook address */
+  xv_x64_const_i *start;
+  xv_x64_const_i *current;
+  ssize_t         capacity;
+} xv_x64_const_ibuffer;
+
+typedef struct {
+  xv_x64_const_ibuffer src;             /* original instructions */
+  xv_x64_ibuffer       dst;             /* recompiled instruction stream */
+  void                *xv_entry_point;  /* system call hook address */
 } xv_x64_rewriter;
 
-int xv_ibuffer_init(xv_x64_ibuffer* const buf);
-int xv_ibuffer_free(xv_x64_ibuffer* const buf);
+int xv_ibuffer_init(xv_x64_ibuffer *buf);
+int xv_ibuffer_free(xv_x64_ibuffer *buf);
 
 /* Write a single literal instruction into the specified buffer, resizing
- * backing allocation structures as necessary */
-int xv_write_insn(xv_x64_ibuffer*   const buf,
-                  xv_x64_const_iptr const insn,
-                  ssize_t           const size);
+ * backing allocation structures as necessary. The buffer's "current" pointer
+ * is advanced to the next free position. */
+int xv_write_insn(xv_x64_ibuffer *buf,
+                  xv_x64_const_i *insn);
+
+/* Read a single instruction from the given const buffer, advancing the buffer
+ * in the process. */
+int xv_read_insn(xv_x64_const_ibuffer *buf,
+                 xv_x64_insn          *result);
+
+/* Possible return values for xv_read_insn */
+#define XV_READ_ERR  -1 /* internal error; read errno */
+#define XV_READ_CONT  0 /* no problems; can read next instruction */
+#define XV_READ_END   1 /* hit end of stream (source is invalid) */
 
 /* Rewrite a single instruction from src to dst, updating both */
-int xv_step_rw(xv_x64_rewriter* const rw);
+int xv_step_rw(xv_x64_rewriter* rw);
 
-/* Possible values for xv_step_rw return: */
-#define XV_STEP_ERR  -1 /* something went wrong; read errno for details */
-#define XV_STEP_CONT 0  /* basic block continues */
-#define XV_STEP_UJMP 1  /* basic block ended with unconditional jump */
-#define XV_STEP_CJMP 2  /* basic block ended with conditional jump */
-#define XV_STEP_END  3  /* we hit the end of declared basic block (illegal) */
+/* Possible return values for xv_step_rw */
+#define XV_RW_ERR  -1   /* internal error; read errno */
+#define XV_RW_CONT  0   /* no problems; can continue */
+#define XV_RW_END   1   /* hit end of stream (source is invalid) */
+#define XV_RW_JMP   2   /* last instruction was unconditional jump */
+#define XV_RW_JCC   3   /* last instruction was conditional jump */
 
 Instruction metadata.
 Instruction argument encodings indexed by key, which in this case is a ten-bit
@@ -94,9 +109,10 @@ typedef struct {
   unsigned int vex_l  : 1;
   unsigned int vex_pp : 2;
 
-  unsigned int escape   : 2;
-  unsigned int          : 2;
-  unsigned int encoding : 4;    /* derived from opcode and prefixes */
+  unsigned int escape  : 2;
+  unsigned int modrm_t : 1;
+  unsigned int imm_t   : 3;
+  unsigned int         : 2;
 
   unsigned int opcode : 8;
   unsigned int mod    : 2;
@@ -124,14 +140,16 @@ These are used for two purposes. First, we need them to indicate the length of
 the remainder of the instruction; and second, we need to figure out how memory
 is accessed and change the ModR/M and SIB bytes for %rip-relative instructions.
 
-#define XV_OPA_NONE   0         /* no-arg insn, e.g. CLD */
-#define XV_OPA_DIRECT 1         /* direct address, "A" in Intel opcode table */
-#define XV_OPA_MODRM  2         /* ModR/M determines reg/mem access ("E") */
-#define XV_OPA_I8     3         /* immediate single-byte absolute, e.g. INT */
-#define XV_OPA_D8     4         /* immediate single-byte relative, e.g. JMP */
-#define XV_OPA_I32    5         /* immediate 4-byte absolute */
-#define XV_OPA_D32    6         /* immediate 4-byte relative */
-#define XV_OPA_
+#define XV_MODRM_NONE 0         /* instruction uses no ModR/M byte */
+#define XV_MODRM_MEM  1         /* uses ModR/M byte to refer to memory */
+
+#define XV_IMM_NONE 0           /* no immediate data following ModR/M (or op) */
+#define XV_IMM_D8   1           /* 8-bit displacement immediate, e.g. JMP */
+#define XV_IMM_D32  2           /* 32-bit displacement immediate */
+#define XV_IMM_I8   3           /* 8-bit invariant immediate, e.g. INT */
+#define XV_IMM_I16  4           /* 16-bit invariant immediate, e.g. MOV */
+#define XV_IMM_I32  5           /* 32-bit invariant immediate */
+#define XV_IMM_I64  6           /* 64-bit invariant immediate */
 
 #define XV_INSN_ESC0   0        /* xv_x64_insn.escape */
 #define XV_INSN_ESC1   1
@@ -193,11 +211,11 @@ the target address without reparsing it.
 #define XV_NO_WRITE (1 << 1)    /* the basic block does not write to memory */
 
 typedef struct {
-  xv_x64_const_iptr addr;       /* starting absolute address */
-  ssize_t           size;       /* size (bytes) of original */
-  xv_x64_const_iptr end_insn;   /* beginning of jump instruction (0 if none) */
-  xv_x64_const_iptr t_addr;     /* translation cache address (0 if none) */
-  uint64_t          flags;      /* see above for values */
+  xv_x64_const_i *addr;         /* starting absolute address */
+  ssize_t         size;         /* size (bytes) of original */
+  xv_x64_const_i *end_insn;     /* beginning of jump instruction (0 if none) */
+  xv_x64_const_i *t_addr;       /* translation cache address (0 if none) */
+  uint64_t        flags;        /* see above for values */
 } xv_x64_bblock;
 
 typedef struct {
@@ -206,23 +224,23 @@ typedef struct {
   int            capacity;      /* total number of block entries */
 } xv_x64_bblock_list;
 
-int xv_bblock_list_init(xv_x64_bblock_list* const bblock_list);
-int xv_bblock_list_free(xv_x64_bblock_list* const bblock_list);
+int xv_bblock_list_init(xv_x64_bblock_list *bblock_list);
+int xv_bblock_list_free(xv_x64_bblock_list *bblock_list);
 
 /* Return index of basic block containing specified addr, -1 if none; runs in
  * O(log n) time */
-int xv_bblock_idx(xv_x64_const_iptr         const addr,
-                  const xv_x64_bblock_list* const bblock_list);
+int xv_bblock_idx(xv_x64_const_i           *addr,
+                  const xv_x64_bblock_list *bblock_list);
 
 /* Add bblock to list, maintaining sort order; runs in O(n) time */
-int xv_add_bblock(xv_x64_bblock const* const bblock,
-                  xv_x64_bblock_list*  const bblock_list);
+int xv_add_bblock(xv_x64_bblock const *bblock,
+                  xv_x64_bblock_list  *bblock_list);
 
 /* Rewrite jump target addresses within specified bblock, causing code to jump
  * directly to other already-rewritten basic blocks rather than into
  * untranslated code (which would cause a segfault that we would intercept) */
-int xv_link_bblock(xv_x64_bblock_list* const bblock_list,
-                   int                 const idx);
+int xv_link_bblock(xv_x64_bblock_list *bblock_list,
+                   int                 idx);
 
 ELF reader.
 All of the machine code coming into the rewriter is probably going to be
@@ -236,7 +254,7 @@ segfault, having then discovered the address of a basic block or fragment.
 
 /* Add all basic blocks from in-memory ELF image; idempotent, and runs in
  * O((k + n)²) time, where k = #bblocks in ELF and n = size of bblock list */
-int xv_elf_into_bblocks(const void*         const elf_image,
-                        xv_x64_bblock_list* const bblock_list);
+int xv_elf_into_bblocks(const void         *elf_image,
+                        xv_x64_bblock_list *bblock_list);
 
 #endif
