@@ -14,6 +14,176 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 
+/* Operand encoding table. */
+/* Enough of an approximation of each instruction's operand encoding that we can */
+/* manipulate it correctly. Note, however, that when transcribing instructions, we */
+/* also need to know some stuff like whether the source instruction had a VEX */
+/* prefix. (This is taken care of in xv_x64_insn.) */
+
+#define R2(...)  __VA_ARGS__, __VA_ARGS__
+#define R4(...)  R2(R2(__VA_ARGS__))
+#define R8(...)  R4(R2(__VA_ARGS__))
+#define R16(...) R8(R2(__VA_ARGS__))
+
+xv_x64_insn_encoding const xv_x64_insn_encodings[1024] = {
+  /* one-byte opcode, no prefix */
+  /* 0x00 - 0x3f */ R8(R4(XV_MODRM_MEM | XV_IMM_NONE),  /* ALU */
+                       XV_MODRM_NONE | XV_IMM_I8,       /* ALU imm8 */
+                       XV_MODRM_NONE | XV_IMM_ISZW,     /* ALU imm */
+                       R2(XV_INVALID)),
+
+  /* 0x40 - 0x4f */ R16(XV_INVALID),                    /* REX prefix */
+  /* 0x50 - 0x5f */ R16(XV_MODRM_NONE | XV_IMM_NONE),
+
+  /* 0x60 - 0x6f */ R8(XV_INVALID),                     /* invalid, prefixes */
+                    XV_MODRM_NONE | XV_IMM_ISZW,        /* push imm */
+                    XV_MODRM_MEM  | XV_IMM_ISZW,        /* three-arg imul */
+                    XV_MODRM_NONE | XV_IMM_I8,          /* push imm8 */
+                    XV_MODRM_MEM  | XV_IMM_I8,          /* three-arg imul */
+                    R4(XV_MODRM_NONE | XV_IMM_NONE),    /* ins, outs */
+
+  /* 0x70 - 0x7f */ R16(XV_MODRM_NONE | XV_IMM_D8),     /* jcc */
+
+  /* 0x80 - 0x8f */ XV_MODRM_MEM | XV_IMM_I8,           /* group1 insns */
+                    XV_MODRM_MEM | XV_IMM_ISZW,         /* group1 insns */
+                    XV_INVALID,
+                    XV_MODRM_MEM | XV_IMM_I8,           /* group1 insns */
+                    R4(XV_MODRM_MEM | XV_IMM_NONE),     /* test, xchg */
+                    R8(XV_MODRM_MEM | XV_IMM_NONE),     /* mov, pop, lea */
+
+  /* 0x90 - 0x9f */ R8(XV_MODRM_NONE | XV_IMM_NONE),    /* xchg with %rax */
+                    R2(XV_MODRM_NONE | XV_IMM_NONE),    /* %rax conversions */
+                    XV_INVALID,                         /* callf */
+                    XV_MODRM_NONE | XV_IMM_NONE,        /* wait */
+                    R4(XV_MODRM_NONE | XV_IMM_NONE),    /* flag insns */
+
+  /* 0xa0 - 0xaf */ R2(XV_MODRM_NONE | XV_IMM_I8,       /* mov %al */
+                       XV_MODRM_NONE | XV_IMM_ISZQ),    /* mov %[re_]ax */
+                    R4(XV_MODRM_NONE | XV_IMM_NONE),    /* movs */
+                    XV_MODRM_NONE | XV_IMM_I8,          /* test %al */
+                    XV_MODRM_NONE | XV_IMM_ISZW,        /* test %[re_]ax */
+                    R2(XV_MODRM_NONE | XV_IMM_NONE),    /* stos[b] */
+                    R4(XV_MODRM_NONE | XV_IMM_NONE),    /* lods[b], scas[b] */
+
+  /* 0xb0 - 0xbf */ R8(XV_MODRM_NONE | XV_IMM_I8),      /* movb %rxx, ib */
+                    R8(XV_MODRM_NONE | XV_IMM_ISZW),    /* mov[wlq] ... */
+
+  /* 0xc0 - 0xcf */ R2(XV_MODRM_MEM | XV_IMM_I8),       /* group2 insns */
+                    XV_MODRM_NONE | XV_IMM_ISZW,        /* ret imm */
+                    XV_MODRM_NONE | XV_IMM_NONE,        /* ret */
+                    R2(XV_INVALID),                     /* les, lds */
+                    XV_MODRM_MEM | XV_IMM_I8,           /* movb */
+                    XV_MODRM_MEM | XV_IMM_ISZW,         /* mov[wlq] */
+                    XV_MODRM_NONE | XV_IMM_I2,          /* enter */
+                    XV_MODRM_NONE | XV_IMM_NONE,        /* leave */
+                    XV_MODRM_NONE | XV_IMM_I16,         /* retf imm16 */
+                    XV_MODRM_NONE | XV_IMM_NONE,        /* retf */
+                    XV_MODRM_NONE | XV_IMM_NONE,        /* int 3 */
+                    XV_MODRM_NONE | XV_IMM_I8,          /* int imm8 */
+                    XV_INVALID,                         /* into */
+                    XV_MODRM_NONE | XV_IMM_NONE,        /* iret */
+
+  /* 0xd0 - 0xdf */ R4(XV_MODRM_MEM | XV_IMM_NONE),     /* group2 insns */
+                    R2(XV_INVALID),                     /* aam, aad */
+                    XV_INVALID,
+                    XV_MODRM_NONE | XV_IMM_NONE,        /* xlat[b_] */
+                    R8(XV_INVALID),                     /* coprocessor */
+
+  /* 0xe0 - 0xef */ R4(XV_MODRM_NONE | XV_IMM_D8),      /* loop, jcxz */
+                    R4(XV_MODRM_NONE | XV_IMM_I8),      /* in/out %al, ... */
+                    R2(XV_MODRM_NONE | XV_IMM_DSZW),    /* call/jmp dispW */
+                    XV_INVALID,                         /* far jmp */
+                    XV_MODRM_NONE | XV_IMM_D8,          /* short jmp disp8 */
+                    R4(XV_MODRM_NONE | XV_IMM_NONE),    /* in/out %a, %d */
+
+  /* 0xf0 - 0xff */ R4(XV_INVALID),                     /* prefixes */
+                    R2(XV_MODRM_NONE | XV_IMM_NONE),    /* hlt, cmc */
+                    R2(XV_MODRM_MEM | XV_IMM_NONE),     /* group3 insns */
+                    R4(XV_MODRM_NONE | XV_IMM_NONE),    /* flags */
+                    R2(XV_MODRM_NONE | XV_IMM_NONE),    /* flags */
+                    R2(XV_MODRM_MEM | XV_IMM_NONE),     /* group4/5 insns */
+
+  /* two-byte opcode, 0x0f prefix */
+  /* 0x00 - 0x0f */ XV_MODRM_MEM | XV_IMM_NONE,         /* group6 insns */
+                    XV_MODRM_MEM | XV_IMM_NONE,         /* group7 insns */
+                    R2(XV_MODRM_MEM | XV_IMM_NONE),     /* lar, lsl */
+                    XV_INVALID,
+                    R2(XV_MODRM_NONE | XV_IMM_NONE),    /* syscall, clts */
+                    XV_MODRM_NONE | XV_IMM_NONE,        /* sysret */
+                    R2(XV_MODRM_NONE | XV_IMM_NONE),    /* invd, wbinvd */
+                    R2(XV_INVALID),
+                    XV_INVALID,
+                    XV_MODRM_MEM | XV_IMM_NONE,         /* prefetchw */
+                    R2(XV_INVALID),
+
+  /* 0x10 - 0x1f */ R16(XV_MODRM_MEM | XV_IMM_NONE),    /* AVX, prefetch */
+  /* 0x20 - 0x2f */ R4(XV_MODRM_MEM | XV_IMM_NONE),     /* AVX */
+                    R4(XV_INVALID),
+                    R8(XV_MODRM_MEM | XV_IMM_NONE),     /* SSE, AVX */
+
+  /* 0x30 - 0x3f */ R4(XV_MODRM_NONE | XV_IMM_NONE),    /* MSR */
+                    R2(XV_MODRM_NONE | XV_IMM_NONE),    /* sysenter, sysexit */
+                    XV_INVALID,
+                    XV_MODRM_NONE | XV_IMM_NONE,        /* getsec */
+                    R8(XV_INVALID),                     /* prefix, invalid */
+
+  /* 0x40 - 0x4f */ R16(XV_MODRM_MEM | XV_IMM_NONE),    /* cmov */
+  /* 0x50 - 0x5f */ R16(XV_MODRM_MEM | XV_IMM_NONE),    /* SSE, AVX */
+  /* 0x60 - 0x6f */ R16(XV_MODRM_MEM | XV_IMM_NONE),    /* SSE, AVX */
+
+  /* 0x70 - 0x7f */ R4(XV_MODRM_MEM | XV_IMM_I8),       /* SSE, AVX imm8 */
+                    R2(XV_MODRM_MEM | XV_IMM_NONE),     /* SSE, AVX */
+                    XV_MODRM_MEM | XV_IMM_NONE,         /* SSE, AVX */
+                    XV_MODRM_NONE | XV_IMM_NONE,        /* emms */
+                    R8(XV_MODRM_MEM | XV_IMM_NONE),     /* VMX, SSE, AVX */
+
+  /* 0x80 - 0x8f */ R16(XV_MODRM_NONE | XV_IMM_DSZW),   /* long jcc */
+  /* 0x90 - 0x9f */ R16(XV_MODRM_MEM | XV_IMM_NONE),    /* setcc */
+
+  /* 0xa0 - 0xaf */ R2(XV_MODRM_NONE | XV_IMM_NONE),    /* push fs, pop fs */
+                    XV_MODRM_NONE | XV_IMM_NONE,        /* cpuid */
+                    XV_MODRM_MEM | XV_IMM_NONE,         /* bt */
+                    XV_MODRM_MEM | XV_IMM_I8,           /* shld imm8 */
+                    XV_MODRM_MEM | XV_IMM_NONE,         /* shld %cl */
+                    R2(XV_INVALID),
+                    R2(XV_MODRM_NONE | XV_IMM_NONE),    /* push gs, pop gs */
+                    XV_MODRM_NONE | XV_IMM_NONE,        /* rsm */
+                    XV_MODRM_MEM | XV_IMM_NONE,         /* bts */
+                    XV_MODRM_MEM | XV_IMM_I8,           /* shrd imm8 */
+                    XV_MODRM_MEM | XV_IMM_NONE,         /* shrd %cl */
+                    XV_MODRM_MEM | XV_IMM_NONE,         /* group15 insns */
+                    XV_MODRM_MEM | XV_IMM_NONE,         /* imul */
+
+  /* 0xb0 - 0xbf */ R8(XV_MODRM_MEM | XV_IMM_NONE),     /* misc */
+                    XV_MODRM_MEM | XV_IMM_NONE,         /* popcnt */
+                    XV_INVALID,                         /* group10 invalid */
+                    XV_MODRM_MEM | XV_IMM_I8,           /* group8 insns */
+                    XV_MODRM_MEM | XV_IMM_NONE,         /* btc */
+                    R4(XV_MODRM_MEM | XV_IMM_NONE),     /* bsf, bsr, movsx */
+
+  /* 0xc0 - 0xcf */ R2(XV_MODRM_MEM | XV_IMM_NONE),     /* xadd */
+                    XV_MODRM_MEM | XV_IMM_I8,           /* vcmpxx */
+                    XV_MODRM_MEM | XV_IMM_NONE,         /* movnti */
+                    R2(XV_MODRM_MEM | XV_IMM_I8),       /* SSE, AVX */
+                    XV_MODRM_MEM | XV_IMM_NONE,         /* group9 insns */
+                    R8(XV_MODRM_NONE | XV_IMM_NONE),    /* bswap */
+
+  /* 0xd0 - 0xdf */ R16(XV_MODRM_MEM | XV_IMM_NONE),    /* SSE, AVX */
+  /* 0xe0 - 0xef */ R16(XV_MODRM_MEM | XV_IMM_NONE),    /* SSE, AVX */
+  /* 0xf0 - 0xff */ R16(XV_MODRM_MEM | XV_IMM_NONE),    /* SSE, AVX */
+
+  /* three-byte opcode, 0x0f 0x38 prefix */
+  R16(R16(XV_MODRM_MEM | XV_IMM_NONE)),                 /* SSE, AVX */
+
+  /* three-byte opcode, 0x0f 0x3a prefix */
+  R16(R16(XV_MODRM_MEM | XV_IMM_I8))                    /* SSE, AVX */
+};
+
+#undef R2
+#undef R4
+#undef R8
+#undef R16
+
 /* Write buffer reallocation. */
 /* This is kind of interesting. xv uses a lame allocation strategy: you allocate */
 /* some initial memory, hopefully enough, then it tries to write into that memory. */
@@ -76,6 +246,24 @@ int xv_x64_reallocate_ibuffer(xv_x64_ibuffer *const buf,
 
 #define XV_OPESC1P(x) ((x) == 0x0f)
 #define XV_OPESC2P(x) ((x) == 0x38 || (x) == 0x3a)
+
+static inline int xv_x64_immediate_bytes(xv_x64_insn const *const insn) {
+  xv_x64_insn_encoding const enc = xv_x64_insn_encodings[xv_x64_insn_key(insn)];
+  switch (enc & XV_IMM_MASK) {
+    case XV_IMM_NONE: return 0;
+    case XV_IMM_D8:
+    case XV_IMM_I8:   return 1;
+    case XV_IMM_I16:  return 2;
+    case XV_IMM_D32:
+    case XV_IMM_I32:  return 4;
+    case XV_IMM_I64:  return 8;
+    case XV_IMM_DSZW:
+    case XV_IMM_ISZW: return insn->p66 ? 2 : 4;
+    case XV_IMM_I2:   return 3;
+    case XV_IMM_ISZQ: return insn->p66 ? 2 : insn->rex_w ? 8 : 4;
+    default:          return 0;
+  }
+}
 
 int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
                      xv_x64_insn          *const insn) {

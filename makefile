@@ -1,8 +1,16 @@
 XV_CC_OPTS = -Wall -Wno-parentheses -std=gnu99
+XV_OBJ     = build/xv-x64.o
+XV_TEST    = test/disasm test/disasm.bin
 
-all: build/xv-x64.o
+all: $(XV_TEST)
 
-build/%.o: build/%.c makefile
+test/%: test/%.c $(XV_OBJ)
+	$(CC) $(CC_OPTS) $(XV_CC_OPTS) $< $(XV_OBJ) -o $@
+
+test/%.bin: test/%.o
+	objcopy -O binary -j .text $< $@
+
+%.o: %.c makefile
 	$(CC) $(CC_OPTS) $(XV_CC_OPTS) $< -c -o $@
 
 build/%.c: %.c.sdoc
