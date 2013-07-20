@@ -51,8 +51,66 @@ See xv-x64.h for relevant definitions. In particular, we make heavy use of the
 encoding table, which tells us just about everything we need to know about the
 instruction.
 
-int xv_x64_insn_size(xv_x64_insn const *const insn) {
-  return 0;     /* FIXME */
+/* Instruction-prefix predicates for byte values */
+#define XV_G1P(x) ((x) == 0xf0 || (x) == 0xf2 || (x) == 0xf3)
+
+#define XV_G2P(x) ((x) == 0x2e || (x) == 0x36 || \
+                   (x) == 0x3e || (x) == 0x26 || \
+                   (x) == 0x64 || (x) == 0x65)
+
+#define XV_G3P(x) ((x) == 0x66)
+#define XV_G4P(x) ((x) == 0x67)
+
+#define XV_REXP(x)  (((x) & 0xf0) == 0x40)
+#define XV_VEX3P(x) ((x) == 0xc4)
+#define XV_VEX2P(x) ((x) == 0xc5)
+
+#define XV_OPESC1P(x) ((x) == 0x0f)
+#define XV_OPESC2P(x) ((x) == 0x38 || (x) == 0x3a)
+
+/* Instruction-encoding predicates */
+inline int xv_x64_riprelp(xv_x64_insn const *const insn) {
+  return insn->mod == 0 && insn->base == 5;
+}
+
+inline int xv_x64_immrelp(xv_x64_insn const *const insn) {
+  xv_x64_insn_encoding const enc =
+    xv_x64_insn_encodings[xv_x64_insn_key(insn)];
+  unsigned imm = enc & XV_IMM_MASK;
+  return imm == XV_IMM_D8
+      || imm == XV_IMM_D32
+      || imm == XV_IMM_DSZW;
+}
+
+inline int xv_x64_syscallp(xv_x64_insn const *const insn) {
+  return insn->escape == XV_INSN_ESC1   /* syscall, sysenter */
+           && (insn->opcode == 0x05 || insn->opcode == 0x34)
+      || insn->escape == XV_INSN_ESC0   /* int 80; maybe invalid in 64-bit? */
+           && insn->opcode    == 0xcd
+           && insn->immediate == 0x80;
+}
+
+int xv_x64_insn_size(xv_x64_insn const *const insn,
+                     void        const *const rip) {
+  /* FIXME: we don't need this function; it can go into write_insn. */
+
+  /* Figure out what kind of prefix structure we're using. We have three
+   * options here:
+   *
+   * 1. VEX encoding (which absorbs other prefixes)
+   * 2. REX encoding
+   * 3. Loose prefixes, no REX */
+  int size = 0;
+
+  if (insn->vex) {
+    /* The original instruction was encoded with VEX, so we need to do the same
+     * to preserve semantics. Now we just need to figure out whether we need
+     * the two or three byte encoding. */
+    /* TODO */
+  } else {
+    /* Original instruction didn't use VEX, so we can't use it either. Encode
+     * using REX if appropriate. */
+  }
 }
 
 int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
@@ -91,7 +149,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
   /* Now look for REX and VEX prefixes. If there are multiple (technically
    * disallowed), we will get wonky results. */
   if (offset >= buf->capacity) return XV_READ_END;
-  for (int rexp, vex2p, vex3p, current = buf->start[offset];
+  for (unsigned rexp, vex2p, vex3p, current = buf->start[offset];
 
        offset < buf->capacity
          && ((rexp  =  XV_REXP(current)) ||
@@ -99,6 +157,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
              (vex3p = XV_VEX3P(current)));
 
        ++offset,
+       insn->vex   |= vex2p || vex3p,
        insn->rex_w |= rexp && !!(current & 0x08),
        insn->r1    |= rexp && (current & 0x04) << 1,    /* REX.R */
        insn->index |= rexp && (current & 0x02) << 2,    /* REX.X */
@@ -134,7 +193,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
   /* By this point we've read all prefixes except for opcode escapes. Now look
    * for those. */
   if (++offset >= buf->capacity) return XV_READ_END;
-  for (int current = buf->start[offset];
+  for (unsigned current = buf->start[offset];
        offset < buf->capacity
          && (!insn->escape     && (insn->escape |= XV_OPESC1P(current)) ||
              insn->escape == 1
@@ -154,9 +213,9 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
   /* If we use ModR/M, parse that byte and check for SIB. */
   if (enc & XV_MODRM_MASK) {
     if (++offset >= buf->capacity) return XV_READ_END;
-    int current = buf->start[offset];
-    insn->mod   = (current & 0xc0) >> 6;
-    insn->r1   |= (current & 0x38) >> 3;
+    unsigned current = buf->start[offset];
+    insn->mod  = (current & 0xc0) >> 6;
+    insn->r1  |= (current & 0x38) >> 3;
 
     int displacement_bytes =
           insn->mod == 0 ? (current & 0x07) == 5 ? 4 : 0
@@ -197,37 +256,27 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 
 int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
                       xv_x64_insn const *const insn) {
-  ssize_t const size     = 0;   /* FIXME */
-  ssize_t const new_size = buf->current - buf->start + size;
-
-  /* Note: we're given that buf->capacity is already a multiple of the page
-   * size, so new_capacity is also. */
-  ssize_t new_capacity = buf->capacity;
-  while ((new_capacity <<= 1) < new_size);
-
-  int err;
+  /* FIXME: this whole function */
+  int new_size = 0;
   if (new_size > buf->capacity) {
     /* Reallocate if possible. Otherwise leave the original structure
      * unmodified and bail. */
-    void* const region = xv_allocate_ibuffer_space(new_capacity);
+    void *const region = xv_allocate_ibuffer_space(buf->capacity << 1);
     if (region == (void*) -1) return errno;
 
     memcpy(region, buf->start, (off_t) buf->current - (off_t) buf->start);
-    if (err = munmap(buf->start, buf->capacity)) {
+    if (munmap(buf->start, buf->capacity)) {
       /* Can't unmap old buffer for some reason, so free our new memory and
        * bail. If we can't unmap new memory, we're totally screwed. */
       int const errno_orig = errno;
-      munmap(region, new_capacity);
+      munmap(region, buf->capacity << 1);
       return errno_orig;
     }
 
-    buf->current += (off_t) region - (off_t) buf->start;
-    buf->start    = region;
-    buf->capacity = new_capacity;
+    buf->current   += (off_t) region - (off_t) buf->start;
+    buf->start      = region;
+    buf->capacity <<= 1;
   }
-
-  memcpy(buf->current, insn, size);
-  buf->current += size;
 
   return 0;
 }
@@ -236,6 +285,6 @@ Instruction rewriter.
 This is where the fun stuff happens. This function steps a rewriter forward by
 one instruction, returning a status code to indicate what should happen next.
 
-int xv_step_rw(xv_x64_rewriter *const shared_rw) {
+int xv_x64_step_rw(xv_x64_rewriter *const shared_rw) {
   return XV_RW_ERR;     /* FIXME */
 }

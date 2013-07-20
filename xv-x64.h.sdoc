@@ -109,6 +109,7 @@ struct xv_x64_insn {
   unsigned int p66    : 1;
   unsigned int p67    : 1;
   unsigned int rex_w  : 1;
+  unsigned int vex    : 1;      /* encoded with vex? (changes semantics) */
   unsigned int vex_l  : 1;
   unsigned int escape : 2;      /* opcode prefix type */
   unsigned int        : 5;
@@ -144,23 +145,6 @@ struct xv_x64_insn {
 #define XV_INSN_FS 5
 #define XV_INSN_GS 6
 
-/* instruction prefix predicates for byte values */
-#define XV_G1P(x) ((x) == 0xf0 || (x) == 0xf2 || (x) == 0xf3)
-
-#define XV_G2P(x) ((x) == 0x2e || (x) == 0x36 || \
-                   (x) == 0x3e || (x) == 0x26 || \
-                   (x) == 0x64 || (x) == 0x65)
-
-#define XV_G3P(x) ((x) == 0x66)
-#define XV_G4P(x) ((x) == 0x67)
-
-#define XV_REXP(x)  (((x) & 0xf0) == 0x40)
-#define XV_VEX3P(x) ((x) == 0xc4)
-#define XV_VEX2P(x) ((x) == 0xc5)
-
-#define XV_OPESC1P(x) ((x) == 0x0f)
-#define XV_OPESC2P(x) ((x) == 0x38 || (x) == 0x3a)
-
 /* Instruction table index of given insn */
 #define xv_x64_insn_key(insn_ptr) \
   ({ \
@@ -177,10 +161,6 @@ int xv_x64_immrelp(xv_x64_insn const *insn);
 
 /* Returns nonzero if the instruction is a system call */
 int xv_x64_syscallp(xv_x64_insn const *insn);
-
-/* Returns the number of bytes of machine code required to encode the
- * instruction */
-int xv_x64_insn_size(xv_x64_insn const *insn);
 
 /* Write a single instruction into the specified buffer, resizing backing
  * allocation structures as necessary. The buffer's "current" pointer is
@@ -200,8 +180,9 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *buf,
 #define XV_READ_CONT  0 /* no problems; can read next instruction */
 #define XV_READ_END   1 /* hit end of stream (source is invalid) */
 
-/* Rewrite a single instruction from src to dst, updating both */
-int xv_step_rw(xv_x64_rewriter* rw);
+/* Rewrite a single instruction from src to dst, updating either both or
+ * neither */
+int xv_x64_step_rw(xv_x64_rewriter* rw);
 
 /* Possible return values for xv_step_rw */
 #define XV_RW_ERR  -1   /* internal error; read errno */
@@ -219,7 +200,6 @@ typedef uint8_t xv_x64_insn_encoding;
 
 /* Bit 0: does instruction use ModR/M byte? */
 #define XV_MODRM_MASK 0x01
-
 #define XV_MODRM_NONE (0 << 0)  /* no ModR/M byte */
 #define XV_MODRM_MEM  (1 << 0)  /* uses ModR/M byte as memory */
 
@@ -407,6 +387,7 @@ xv_x64_insn_encoding const xv_x64_insn_encodings[1024] =
 #undef R2
 #undef R4
 #undef R8
+#undef R16
 
 inline int xv_x64_immediate_bytes(xv_x64_insn const *const insn) {
   xv_x64_insn_encoding const enc = xv_x64_insn_encodings[xv_x64_insn_key(insn)];
