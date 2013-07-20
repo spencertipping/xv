@@ -50,12 +50,14 @@ typedef uint8_t       xv_x64_i;
 typedef uint8_t const xv_x64_const_i;
 
 struct xv_x64_ibuffer {
-  xv_x64_i *start;                      /* start of allocated region */
-  xv_x64_i *current;                    /* current insertion point */
-  ssize_t   capacity;                   /* size (bytes) of allocated region */
+  xv_x64_const_i *logical_start;
+  xv_x64_i       *start;                /* start of allocated region */
+  xv_x64_i       *current;              /* current insertion point */
+  ssize_t         capacity;             /* size (bytes) of allocated region */
 };
 
 struct xv_x64_const_ibuffer {
+  xv_x64_const_i *logical_start;
   xv_x64_const_i *start;
   xv_x64_const_i *current;
   ssize_t         capacity;
@@ -69,32 +71,6 @@ struct xv_x64_rewriter {
 
 int xv_ibuffer_init(xv_x64_ibuffer *buf);
 int xv_ibuffer_free(xv_x64_ibuffer *buf);
-
-/* Write a single literal instruction into the specified buffer, resizing
- * backing allocation structures as necessary. The buffer's "current" pointer
- * is advanced to the next free position. */
-int xv_write_insn(xv_x64_ibuffer    *buf,
-                  xv_x64_insn const *insn);
-
-/* Read a single instruction from the given const buffer, advancing the buffer
- * in the process. */
-int xv_read_insn(xv_x64_const_ibuffer *buf,
-                 xv_x64_insn          *result);
-
-/* Possible return values for xv_read_insn */
-#define XV_READ_ERR  -1 /* internal error; read errno */
-#define XV_READ_CONT  0 /* no problems; can read next instruction */
-#define XV_READ_END   1 /* hit end of stream (source is invalid) */
-
-/* Rewrite a single instruction from src to dst, updating both */
-int xv_step_rw(xv_x64_rewriter* rw);
-
-/* Possible return values for xv_step_rw */
-#define XV_RW_ERR  -1   /* internal error; read errno */
-#define XV_RW_CONT  0   /* no problems; can continue */
-#define XV_RW_END   1   /* hit end of stream (source is invalid) */
-#define XV_RW_JMP   2   /* last instruction was unconditional jump */
-#define XV_RW_JCC   3   /* last instruction was conditional jump */
 
 Instruction metadata.
 Intel opcodes and encodings are generally horrible. Luckily, we can factor away
@@ -126,23 +102,26 @@ memory accesses. In this sense our interface is more like an assembler than
 like a machine-code manipulation layer.
 
 struct xv_x64_insn {
-  unsigned int p1    : 2;
-  unsigned int p2    : 3;
-  unsigned int p66   : 1;
-  unsigned int p67   : 1;
-  unsigned int rex_w : 1;
-  unsigned int vex_l : 1;
+  void const *rip;              /* %rip of original instruction */
+
+  unsigned int p1     : 2;
+  unsigned int p2     : 3;
+  unsigned int p66    : 1;
+  unsigned int p67    : 1;
+  unsigned int rex_w  : 1;
+  unsigned int vex_l  : 1;
+  unsigned int escape : 2;      /* opcode prefix type */
+  unsigned int        : 5;
 
   unsigned int opcode : 8;      /* opcode byte */
-  unsigned int escape : 2;      /* opcode prefix type */
 
-  unsigned int r1 : 4;          /* sometimes used as opcode extension */
-  unsigned int r2 : 4;
-  unsigned int r3 : 4;          /* r3 is present only with VEX */
+  unsigned int mod : 2;         /* ModR/M high bits */
+  unsigned int r1  : 4;         /* ModR/M reg field (with REX/VEX bit) */
+  unsigned int r3  : 4;         /* r3 is present only with VEX */
 
   unsigned int scale : 2;       /* SIB byte encoding */
-  unsigned int base  : 4;
   unsigned int index : 4;
+  unsigned int base  : 4;       /* the /m part of ModR/M if no SIB */
 
   int32_t displacement;         /* memory displacement, up to 32 bits */
   int64_t immediate;            /* sometimes memory offset (e.g. JMP) */
@@ -165,24 +144,22 @@ struct xv_x64_insn {
 #define XV_INSN_FS 5
 #define XV_INSN_GS 6
 
-/* xv_x64_const_i* prefix checks */
-#define XV_G1P(iptr) (*(iptr) == 0xf0 || \
-                      *(iptr) == 0xf2 || \
-                      *(iptr) == 0xf3)
+/* instruction prefix predicates for byte values */
+#define XV_G1P(x) ((x) == 0xf0 || (x) == 0xf2 || (x) == 0xf3)
 
-#define XV_G2P(iptr) (*(iptr) == 0x2e || *(iptr) == 0x36 || \
-                      *(iptr) == 0x3e || *(iptr) == 0x26 || \
-                      *(iptr) == 0x64 || *(iptr) == 0x65)
+#define XV_G2P(x) ((x) == 0x2e || (x) == 0x36 || \
+                   (x) == 0x3e || (x) == 0x26 || \
+                   (x) == 0x64 || (x) == 0x65)
 
-#define XV_G3P(iptr) (*(iptr) == 0x66)
-#define XV_G4P(iptr) (*(iptr) == 0x67)
+#define XV_G3P(x) ((x) == 0x66)
+#define XV_G4P(x) ((x) == 0x67)
 
-#define XV_REXP(iptr)  ((*(iptr) & 0xf0) == 0x40)
-#define XV_VEX3P(iptr) (*(iptr) == 0xc4)
-#define XV_VEX2P(iptr) (*(iptr) == 0xc5)
+#define XV_REXP(x)  (((x) & 0xf0) == 0x40)
+#define XV_VEX3P(x) ((x) == 0xc4)
+#define XV_VEX2P(x) ((x) == 0xc5)
 
-#define XV_OPESC1P(iptr) (*(iptr) == 0x0f)
-#define XV_OPESC2P(iptr) (*(iptr) == 0x38 || *(iptr) == 0x3a)
+#define XV_OPESC1P(x) ((x) == 0x0f)
+#define XV_OPESC2P(x) ((x) == 0x38 || (x) == 0x3a)
 
 /* Instruction table index of given insn */
 #define xv_x64_insn_key(insn_ptr) \
@@ -203,7 +180,35 @@ int xv_x64_syscallp(xv_x64_insn const *insn);
 
 /* Returns the number of bytes of machine code required to encode the
  * instruction */
-int xv_x64_insnsize(xv_x64_insn const *insn);
+int xv_x64_insn_size(xv_x64_insn const *insn);
+
+/* Write a single instruction into the specified buffer, resizing backing
+ * allocation structures as necessary. The buffer's "current" pointer is
+ * advanced to the next free position. If errors occur, *buf will be
+ * unchanged. */
+int xv_x64_write_insn(xv_x64_ibuffer    *buf,
+                      xv_x64_insn const *insn);
+
+/* Read a single instruction from the given const buffer, advancing the buffer
+ * in the process. Writes result into *insn. If errors occur, *insn has
+ * undefined state and *buf will be unchanged. */
+int xv_x64_read_insn(xv_x64_const_ibuffer *buf,
+                     xv_x64_insn          *insn);
+
+/* Possible return values for xv_read_insn */
+#define XV_READ_ERR  -1 /* internal error; read errno */
+#define XV_READ_CONT  0 /* no problems; can read next instruction */
+#define XV_READ_END   1 /* hit end of stream (source is invalid) */
+
+/* Rewrite a single instruction from src to dst, updating both */
+int xv_step_rw(xv_x64_rewriter* rw);
+
+/* Possible return values for xv_step_rw */
+#define XV_RW_ERR  -1   /* internal error; read errno */
+#define XV_RW_CONT  0   /* no problems; can continue */
+#define XV_RW_END   1   /* hit end of stream (source is invalid) */
+#define XV_RW_JMP   2   /* last instruction was unconditional jump */
+#define XV_RW_JCC   3   /* last instruction was conditional jump */
 
 Operand encodings.
 These are used for two purposes. First, we need them to indicate the length of
@@ -403,7 +408,7 @@ xv_x64_insn_encoding const xv_x64_insn_encodings[1024] =
 #undef R4
 #undef R8
 
-static inline int xv_x64_immediate_bytes(xv_x64_insn const *const insn) {
+inline int xv_x64_immediate_bytes(xv_x64_insn const *const insn) {
   xv_x64_insn_encoding const enc = xv_x64_insn_encodings[xv_x64_insn_key(insn)];
   switch (enc & XV_IMM_MASK) {
     case XV_IMM_NONE: return 0;
@@ -417,6 +422,7 @@ static inline int xv_x64_immediate_bytes(xv_x64_insn const *const insn) {
     case XV_IMM_ISZW: return insn->p66 ? 2 : 4;
     case XV_IMM_I2:   return 3;
     case XV_IMM_ISZQ: return insn->p66 ? 2 : insn->rex_w ? 8 : 4;
+    default:          return 0;
   }
 }
 

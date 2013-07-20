@@ -46,8 +46,157 @@ int xv_ibuffer_free(xv_x64_ibuffer* const buf) {
   return 0;
 }
 
-int xv_write_insn(xv_x64_ibuffer    *const buf,
-                  xv_x64_insn const *const insn) {
+Instruction parser and generator.
+See xv-x64.h for relevant definitions. In particular, we make heavy use of the
+encoding table, which tells us just about everything we need to know about the
+instruction.
+
+int xv_x64_insn_size(xv_x64_insn const *const insn) {
+  return 0;     /* FIXME */
+}
+
+int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
+                     xv_x64_insn          *const insn) {
+  int const initial_offset = buf->current - buf->start;
+  int       offset         = initial_offset;
+
+  memset(insn, 0, sizeof(xv_x64_insn));
+
+  /* Look for group 1, 2, 3, and 4 prefixes, ignoring each one after we see the
+   * first. We're done looking if we hit the end of the input stream, or if we
+   * see anything that isn't a prefix. */
+  if (offset >= buf->capacity) return XV_READ_END;
+  for (int g1p, g2p, g3p, g4p, current = buf->start[offset];
+
+       offset < buf->capacity
+         && ((g1p = XV_G1P(current)) || (g2p = XV_G2P(current)) ||
+             (g3p = XV_G3P(current)) || (g4p = XV_G4P(current)));
+
+       ++offset,
+       insn->p1 = !insn->p1 && g1p ? current == 0xf0 ? XV_INSN_LOCK
+                                   : current == 0xf2 ? XV_INSN_REPNZ
+                                                     : XV_INSN_REPZ
+                                   : insn->p1,
+
+       insn->p2 = !insn->p2 && g2p ? current == 0x2e ? XV_INSN_CS
+                                   : current == 0x36 ? XV_INSN_SS
+                                   : current == 0x3e ? XV_INSN_DS
+                                   : current == 0x26 ? XV_INSN_ES
+                                   : current == 0x64 ? XV_INSN_FS
+                                                     : XV_INSN_GS
+                                   : insn->p2,
+       insn->p66 |= g3p,
+       insn->p67 |= g4p);
+
+  /* Now look for REX and VEX prefixes. If there are multiple (technically
+   * disallowed), we will get wonky results. */
+  if (offset >= buf->capacity) return XV_READ_END;
+  for (int rexp, vex2p, vex3p, current = buf->start[offset];
+
+       offset < buf->capacity
+         && ((rexp  =  XV_REXP(current)) ||
+             (vex2p = XV_VEX2P(current)) ||
+             (vex3p = XV_VEX3P(current)));
+
+       ++offset,
+       insn->rex_w |= rexp && !!(current & 0x08),
+       insn->r1    |= rexp && (current & 0x04) << 1,    /* REX.R */
+       insn->index |= rexp && (current & 0x02) << 2,    /* REX.X */
+       insn->base  |= rexp && (current & 0x01) << 3)    /* REX.B */
+
+    if (vex2p || vex3p) {
+      if (vex2p) {
+        if (++offset >= buf->capacity) return XV_READ_END;
+        current = buf->start[offset];
+        insn->escape = XV_INSN_ESC1;                    /* implied */
+        insn->r1     = !(current & 0x80) << 3;          /* VEX.R */
+      } else if (vex3p) {
+        if (++offset >= buf->capacity) return XV_READ_END;
+        current = buf->start[offset];
+        insn->r1     = !(current & 0x80) << 3;          /* VEX.R */
+        insn->index  = !(current & 0x40) << 3;          /* VEX.X */
+        insn->base   = !(current & 0x20) << 3;          /* VEX.B */
+        insn->escape = current & 0x1f;                  /* VEX.m-mmmm */
+
+        if (++offset >= buf->capacity) return XV_READ_END;
+        current = buf->start[offset];
+        insn->rex_w = !!(current & 0x80);               /* VEX.W */
+      }
+
+      insn->r3     =   (current & 0x78) >> 3 ^ 0x0f;    /* VEX.vvvv */
+      insn->vex_l  = !!(current & 0x04);
+      insn->p66   |= current == 0x01;                   /* VEX.pp */
+      insn->p2     = (current & 0x03) == 2 ? XV_INSN_REPZ
+                   : (current & 0x03) == 3 ? XV_INSN_REPNZ
+                   : insn->p2;
+    }
+
+  /* By this point we've read all prefixes except for opcode escapes. Now look
+   * for those. */
+  if (++offset >= buf->capacity) return XV_READ_END;
+  for (int current = buf->start[offset];
+       offset < buf->capacity
+         && (!insn->escape     && (insn->escape |= XV_OPESC1P(current)) ||
+             insn->escape == 1
+               && (insn->escape = current == 0x38 ? XV_INSN_ESC238
+                                : current == 0x3a ? XV_INSN_ESC23A
+                                : insn->escape));
+      ++offset);
+
+  if (offset >= buf->capacity) return XV_READ_END;
+  insn->opcode = buf->start[offset];
+
+  /* Now we have the opcode and all associated prefixes, so we can parse out
+   * the remaining bytes using the operand encoding table. */
+  xv_x64_insn_encoding const enc =
+    xv_x64_insn_encodings[xv_x64_insn_key(insn)];
+
+  /* If we use ModR/M, parse that byte and check for SIB. */
+  if (enc & XV_MODRM_MASK) {
+    if (++offset >= buf->capacity) return XV_READ_END;
+    int current = buf->start[offset];
+    insn->mod   = (current & 0xc0) >> 6;
+    insn->r1   |= (current & 0x38) >> 3;
+
+    int displacement_bytes =
+          insn->mod == 0 ? (current & 0x07) == 5 ? 4 : 0
+        : insn->mod == 1 ? 1
+        : insn->mod == 2 ? 4 : 0;
+
+    if (insn->mod != 3 && (current & 0x07) == 4) {
+      if (++offset >= buf->capacity) return XV_READ_END;
+      current = buf->start[offset];
+      insn->scale  = (current & 0xc0) >> 6;
+      insn->index |= (current & 0x38) >> 3;
+    }
+
+    insn->base |= current & 0x07;
+
+    /* Now read little-endian displacement. */
+    if ((offset += displacement_bytes) >= buf->capacity) return XV_READ_END;
+    for (int i = 0; i < displacement_bytes; ++i)
+      insn->displacement =
+        insn->displacement << 8 | buf->start[offset - i];
+  }
+
+  /* And read the immediate data, little-endian. */
+  int const immediate_size = xv_x64_immediate_bytes(insn);
+  if ((offset += immediate_size) >= buf->capacity) return XV_READ_END;
+  for (int i = 0; i < immediate_size; ++i)
+    insn->immediate =
+      insn->immediate << 8 | buf->start[offset - i];
+
+  /* Now update the buffer and record the instruction's logical %rip value.
+   * This will allow us to track the absolute address for cases like
+   * %rip-relative displacement. */
+  buf->current = buf->start + ++offset;
+  insn->rip    = buf->current - buf->start + buf->logical_start;
+
+  return XV_READ_CONT;
+}
+
+int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
+                      xv_x64_insn const *const insn) {
   ssize_t const size     = 0;   /* FIXME */
   ssize_t const new_size = buf->current - buf->start + size;
 
@@ -61,8 +210,7 @@ int xv_write_insn(xv_x64_ibuffer    *const buf,
     /* Reallocate if possible. Otherwise leave the original structure
      * unmodified and bail. */
     void* const region = xv_allocate_ibuffer_space(new_capacity);
-    if (region == (void*) -1)
-      return errno;
+    if (region == (void*) -1) return errno;
 
     memcpy(region, buf->start, (off_t) buf->current - (off_t) buf->start);
     if (err = munmap(buf->start, buf->capacity)) {
@@ -88,27 +236,6 @@ Instruction rewriter.
 This is where the fun stuff happens. This function steps a rewriter forward by
 one instruction, returning a status code to indicate what should happen next.
 
-int xv_step_rw(xv_x64_rewriter* const shared_rw) {
-  /* Make all local changes to our own copy. This lets us easily back out if we
-   * hit errors. */
-  xv_x64_rewriter       rw     = *shared_rw;
-  xv_x64_const_i *const istart =  shared_rw->src.start;
-
-  int address_size_prefix = 0;
-
-  /* Parse out all prefixes. Rewriting is closed under instruction prefixes,
-   * with the exception of address size (0x67). */
-  for (int prefix_1_seen = 0, prefix_2_seen = 0, g1p, g2p,
-           prefix_3_seen = 0, prefix_4_seen = 0, g3p, g4p;
-       rw.src.current - rw.src.start < rw.src.capacity &&
-         (prefix_1_seen ^ (g1p |= XV_G1P(rw.src.start)) ||
-          prefix_2_seen ^ (g2p |= XV_G2P(rw.src.start)) ||
-          prefix_3_seen ^ (g3p |= XV_G3P(rw.src.start)) ||
-          prefix_4_seen ^ (g4p |= XV_G4P(rw.src.start)));
-       ++rw.src.start,
-       prefix_1_seen = g1p, prefix_2_seen = g2p,
-       prefix_3_seen = g3p, prefix_4_seen = g4p)
-    address_size_prefix = prefix_3_seen;
-
+int xv_step_rw(xv_x64_rewriter *const shared_rw) {
   return XV_RW_ERR;     /* FIXME */
 }
