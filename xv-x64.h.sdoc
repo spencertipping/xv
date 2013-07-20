@@ -46,11 +46,32 @@ libxv. These calls aren't standard C calls; they're literally x86-64 CALL
 instructions that go to a receiver site in libxv. This receiver site then reads
 the relevant registers and performs or emulates the system call itself.
 
-typedef uint8_t       xv_x64_i;
+typedef uint8_t       xv_x64_i;         /* absolutely must be unsigned */
 typedef uint8_t const xv_x64_const_i;
 
+Buffers.
+The only interesting thing going on here is that we have two start pointers. We
+do this because of an unfortunate confluence of problems:
+
+| 1. The managing xv process is loaded into memory before the virtualized
+     executable, so it may be hogging addresses mapped by the ELF image.
+  2. We can't move xv because we'd probably also have to move libc itself.
+  3. Although ld-linux.so can move ELF code just fine, the main loadable
+     segment can't be relocated trivially. (At least, that's what it sounds
+     like; I should probably research this more.)
+
+The good news is that there's an easier way to do it. Since we're going to
+rewrite all of the machine code anyway, we don't need to worry about loading
+the original code in the right place. In fact, we don't have to load it at all
+apart from just mapping the ELF file into memory. All we need to do is keep
+track of where the code would have gone, then add the displacements together
+when we generate the new code.
+
+Note that these logical_start values aren't %rip offsets, they're just memory
+locations. We won't know the %rip offsets until we start decoding stuff.
+
 struct xv_x64_ibuffer {
-  xv_x64_const_i *logical_start;
+  xv_x64_const_i *logical_start;        /* code address start */
   xv_x64_i       *start;                /* start of allocated region */
   xv_x64_i       *current;              /* current insertion point */
   ssize_t         capacity;             /* size (bytes) of allocated region */
@@ -69,8 +90,10 @@ struct xv_x64_rewriter {
   void                *xv_entry_point;  /* system call hook address */
 };
 
-int xv_ibuffer_init(xv_x64_ibuffer *buf);
-int xv_ibuffer_free(xv_x64_ibuffer *buf);
+/* Free any existing buffer memory, then allocate to new size. buf is unchanged
+ * if return code is nonzero. */
+int xv_x64_reallocate_ibuffer(xv_x64_ibuffer *buf,
+                              ssize_t         size);
 
 Instruction metadata.
 Intel opcodes and encodings are generally horrible. Luckily, we can factor away
@@ -169,13 +192,18 @@ int xv_x64_syscallp(xv_x64_insn const *insn);
 int xv_x64_write_insn(xv_x64_ibuffer    *buf,
                       xv_x64_insn const *insn);
 
+/* Possible return values for xv_x64_write_insn */
+#define XV_WR_ERR  -1   /* internal error; read errno */
+#define XV_WR_CONT  0   /* no problems; can continue writing */
+#define XV_WR_END   1   /* hit end of buffer; you need to reallocate */
+
 /* Read a single instruction from the given const buffer, advancing the buffer
  * in the process. Writes result into *insn. If errors occur, *insn has
  * undefined state and *buf will be unchanged. */
 int xv_x64_read_insn(xv_x64_const_ibuffer *buf,
                      xv_x64_insn          *insn);
 
-/* Possible return values for xv_read_insn */
+/* Possible return values for xv_x64_read_insn */
 #define XV_READ_ERR  -1 /* internal error; read errno */
 #define XV_READ_CONT  0 /* no problems; can read next instruction */
 #define XV_READ_END   1 /* hit end of stream (source is invalid) */
@@ -184,12 +212,11 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *buf,
  * neither */
 int xv_x64_step_rw(xv_x64_rewriter* rw);
 
-/* Possible return values for xv_step_rw */
+/* Possible return values for xv_x64_step_rw */
 #define XV_RW_ERR  -1   /* internal error; read errno */
 #define XV_RW_CONT  0   /* no problems; can continue */
-#define XV_RW_END   1   /* hit end of stream (source is invalid) */
-#define XV_RW_JMP   2   /* last instruction was unconditional jump */
-#define XV_RW_JCC   3   /* last instruction was conditional jump */
+#define XV_RW_ENDI  1   /* hit end of input; stream is invalid */
+#define XV_RW_ENDO  2   /* hit end of output; you need to reallocate */
 
 Operand encodings.
 These are used for two purposes. First, we need them to indicate the length of
@@ -406,69 +433,5 @@ inline int xv_x64_immediate_bytes(xv_x64_insn const *const insn) {
     default:          return 0;
   }
 }
-
-Basic blocks.
-Each basic block knows the translation address, and basic blocks are stored in
-a sorted structure so we can trace segfault addresses back to the corresponding
-piece of code. (This will happen anytime the code attempts to modify itself.)
-
-In addition, basic blocks provide flags, which indicate various possibly-useful
-properties. For example, we mark any basic block that doesn't have any
-memory-writing operations, and we mark those that make no system calls.
-
-We also need to keep track of the kind of jump the block uses. Each basic block
-will end for a specific reason, often because we encountered a jump
-instruction. We store the type of ending on the basic block so we can recover
-the target address without reparsing it.
-
-#define XV_NO_SYS   (1 << 0)    /* the basic block makes no system calls */
-#define XV_NO_WRITE (1 << 1)    /* the basic block does not write to memory */
-
-struct xv_x64_bblock {
-  xv_x64_const_i *addr;         /* starting absolute address */
-  ssize_t         size;         /* size (bytes) of original */
-  xv_x64_const_i *end_insn;     /* beginning of jump instruction (0 if none) */
-  xv_x64_const_i *t_addr;       /* translation cache address (0 if none) */
-  uint64_t        flags;        /* see above for values */
-};
-
-struct xv_x64_bblock_list {
-  xv_x64_bblock *blocks;        /* array of blocks, always sorted by addr */
-  int            size;          /* number of used block entries */
-  int            capacity;      /* total number of block entries */
-};
-
-int xv_bblock_list_init(xv_x64_bblock_list *bblock_list);
-int xv_bblock_list_free(xv_x64_bblock_list *bblock_list);
-
-/* Return index of basic block containing specified addr, -1 if none; runs in
- * O(log n) time */
-int xv_bblock_idx(xv_x64_const_i           *addr,
-                  const xv_x64_bblock_list *bblock_list);
-
-/* Add bblock to list, maintaining sort order; runs in O(n) time */
-int xv_add_bblock(xv_x64_bblock const *bblock,
-                  xv_x64_bblock_list  *bblock_list);
-
-/* Rewrite jump target addresses within specified bblock, causing code to jump
- * directly to other already-rewritten basic blocks rather than into
- * untranslated code (which would cause a segfault that we would intercept) */
-int xv_link_bblock(xv_x64_bblock_list *bblock_list,
-                   int                 idx);
-
-ELF reader.
-All of the machine code coming into the rewriter is probably going to be
-encased in ELF objects. This is useful for us because we can easily map the ELF
-into memory, then use the symbol table to build a list of basic blocks.
-
-Some (admittedly rare and bizarre) ELF objects have invalid symbol tables or
-other such nonsense. In this case, we can use the entry point (for
-executables), or we can wait for code to be executed and catch the resulting
-segfault, having then discovered the address of a basic block or fragment.
-
-/* Add all basic blocks from in-memory ELF image; idempotent, and runs in
- * O((k + n)²) time, where k = #bblocks in ELF and n = size of bblock list */
-int xv_elf_into_bblocks(const void         *elf_image,
-                        xv_x64_bblock_list *bblock_list);
 
 #endif

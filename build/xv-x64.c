@@ -14,39 +14,48 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 
-/* Instruction buffer boilerplate. */
-/* All of the interesting stuff is further below. */
+/* Write buffer reallocation. */
+/* This is kind of interesting. xv uses a lame allocation strategy: you allocate */
+/* some initial memory, hopefully enough, then it tries to write into that memory. */
+/* If it fails, you have to throw it all away, allocate more memory, and try */
+/* again. The reason is that instructions change as you move them, and in some */
+/* cases even their sizes change. So there is no way you can reuse the old */
+/* compilation output. Fortunately, rewriting should be fast enough that this */
+/* isn't a problem. */
 
-#define xv_allocate_ibuffer_space(capacity) \
-  mmap(NULL, \
-       (capacity), \
-       PROT_READ | PROT_WRITE | PROT_EXEC, \
-       MAP_PRIVATE | MAP_ANONYMOUS, \
-       -1, \
-       0)
+/* Note that the first time you "reallocate" a buffer, it should have a zero */
+/* start-pointer. Otherwise this call will do nothing and return an error code */
+/* because it will think it couldn't free memory. */
 
-int xv_ibuffer_init(xv_x64_ibuffer* const buf) {
-  int   const page_size = getpagesize();
-  void* const region    = xv_allocate_ibuffer_space(page_size);
+int xv_x64_reallocate_ibuffer(xv_x64_ibuffer *const buf,
+                              ssize_t         const size) {
+  ssize_t const page_size = getpagesize();
+  ssize_t const rounded   = size + page_size - 1 & ~(page_size - 1);
 
-  if (region == (void*) -1)
-    return errno;
+  if (buf->capacity == rounded) return 0;
+  if (buf->start && munmap(buf->start, buf->capacity)) return errno;
 
-  buf->start = buf->current = (xv_x64_i*) region;
-  buf->capacity             = page_size;
+  if (size > 0) {
+    void *const region = mmap(NULL,
+                              rounded,
+                              PROT_READ | PROT_WRITE | PROT_EXEC,
+                              MAP_PRIVATE | MAP_ANONYMOUS,
+                              -1,
+                              0);
+
+    if (region == (void *const) -1) return errno;
+
+    buf->start    = region;
+    buf->capacity = rounded;
+  } else {
+    buf->start    = NULL;
+    buf->capacity = 0;
+  }
+
   return 0;
 }
 
-int xv_ibuffer_free(xv_x64_ibuffer* const buf) {
-  if (buf->start && munmap(buf->start, buf->capacity))
-    return errno;
-
-  buf->start = buf->current = NULL;
-  buf->capacity             = 0;
-  return 0;
-}
-
-/* Instruction parser and generator. */
+/* Instruction parser. */
 /* See xv-x64.h for relevant definitions. In particular, we make heavy use of the */
 /* encoding table, which tells us just about everything we need to know about the */
 /* instruction. */
@@ -68,51 +77,6 @@ int xv_ibuffer_free(xv_x64_ibuffer* const buf) {
 #define XV_OPESC1P(x) ((x) == 0x0f)
 #define XV_OPESC2P(x) ((x) == 0x38 || (x) == 0x3a)
 
-/* Instruction-encoding predicates */
-inline int xv_x64_riprelp(xv_x64_insn const *const insn) {
-  return insn->mod == 0 && insn->base == 5;
-}
-
-inline int xv_x64_immrelp(xv_x64_insn const *const insn) {
-  xv_x64_insn_encoding const enc =
-    xv_x64_insn_encodings[xv_x64_insn_key(insn)];
-  unsigned imm = enc & XV_IMM_MASK;
-  return imm == XV_IMM_D8
-      || imm == XV_IMM_D32
-      || imm == XV_IMM_DSZW;
-}
-
-inline int xv_x64_syscallp(xv_x64_insn const *const insn) {
-  return insn->escape == XV_INSN_ESC1   /* syscall, sysenter */
-           && (insn->opcode == 0x05 || insn->opcode == 0x34)
-      || insn->escape == XV_INSN_ESC0   /* int 80; maybe invalid in 64-bit? */
-           && insn->opcode    == 0xcd
-           && insn->immediate == 0x80;
-}
-
-int xv_x64_insn_size(xv_x64_insn const *const insn,
-                     void        const *const rip) {
-  /* FIXME: we don't need this function; it can go into write_insn. */
-
-  /* Figure out what kind of prefix structure we're using. We have three
-   * options here:
-   *
-   * 1. VEX encoding (which absorbs other prefixes)
-   * 2. REX encoding
-   * 3. Loose prefixes, no REX */
-  int size = 0;
-
-  if (insn->vex) {
-    /* The original instruction was encoded with VEX, so we need to do the same
-     * to preserve semantics. Now we just need to figure out whether we need
-     * the two or three byte encoding. */
-    /* TODO */
-  } else {
-    /* Original instruction didn't use VEX, so we can't use it either. Encode
-     * using REX if appropriate. */
-  }
-}
-
 int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
                      xv_x64_insn          *const insn) {
   int const initial_offset = buf->current - buf->start;
@@ -124,7 +88,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
    * first. We're done looking if we hit the end of the input stream, or if we
    * see anything that isn't a prefix. */
   if (offset >= buf->capacity) return XV_READ_END;
-  for (int g1p, g2p, g3p, g4p, current = buf->start[offset];
+  for (unsigned g1p, g2p, g3p, g4p, current = buf->start[offset];
 
        offset < buf->capacity
          && ((g1p = XV_G1P(current)) || (g2p = XV_G2P(current)) ||
@@ -234,16 +198,14 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
     /* Now read little-endian displacement. */
     if ((offset += displacement_bytes) >= buf->capacity) return XV_READ_END;
     for (int i = 0; i < displacement_bytes; ++i)
-      insn->displacement =
-        insn->displacement << 8 | buf->start[offset - i];
+      insn->displacement = insn->displacement << 8 | buf->start[offset - i];
   }
 
   /* And read the immediate data, little-endian. */
   int const immediate_size = xv_x64_immediate_bytes(insn);
   if ((offset += immediate_size) >= buf->capacity) return XV_READ_END;
   for (int i = 0; i < immediate_size; ++i)
-    insn->immediate =
-      insn->immediate << 8 | buf->start[offset - i];
+    insn->immediate = insn->immediate << 8 | buf->start[offset - i];
 
   /* Now update the buffer and record the instruction's logical %rip value.
    * This will allow us to track the absolute address for cases like
@@ -254,39 +216,43 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
   return XV_READ_CONT;
 }
 
+/* Instruction generator. */
+/* Write a structured instruction back out as x86 machine code. */
+
 int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
                       xv_x64_insn const *const insn) {
-  /* FIXME: this whole function */
-  int new_size = 0;
-  if (new_size > buf->capacity) {
-    /* Reallocate if possible. Otherwise leave the original structure
-     * unmodified and bail. */
-    void *const region = xv_allocate_ibuffer_space(buf->capacity << 1);
-    if (region == (void*) -1) return errno;
-
-    memcpy(region, buf->start, (off_t) buf->current - (off_t) buf->start);
-    if (munmap(buf->start, buf->capacity)) {
-      /* Can't unmap old buffer for some reason, so free our new memory and
-       * bail. If we can't unmap new memory, we're totally screwed. */
-      int const errno_orig = errno;
-      munmap(region, buf->capacity << 1);
-      return errno_orig;
-    }
-
-    buf->current   += (off_t) region - (off_t) buf->start;
-    buf->start      = region;
-    buf->capacity <<= 1;
-  }
-
-  return 0;
+  /* TODO */
+  return XV_WR_ERR;
 }
 
 /* Instruction rewriter. */
 /* This is where the fun stuff happens. This function steps a rewriter forward by */
 /* one instruction, returning a status code to indicate what should happen next. */
 
+inline int xv_x64_riprelp(xv_x64_insn const *const insn) {
+  return insn->mod == 0 && insn->base == 5;
+}
+
+inline int xv_x64_immrelp(xv_x64_insn const *const insn) {
+  xv_x64_insn_encoding const enc =
+    xv_x64_insn_encodings[xv_x64_insn_key(insn)];
+  unsigned const imm = enc & XV_IMM_MASK;
+  return imm == XV_IMM_D8
+      || imm == XV_IMM_D32
+      || imm == XV_IMM_DSZW;
+}
+
+inline int xv_x64_syscallp(xv_x64_insn const *const insn) {
+  return insn->escape == XV_INSN_ESC1   /* syscall, sysenter */
+           && (insn->opcode == 0x05 || insn->opcode == 0x34)
+      || insn->escape == XV_INSN_ESC0   /* int 80; maybe invalid in 64-bit? */
+           && insn->opcode    == 0xcd
+           && insn->immediate == 0x80;
+}
+
 int xv_x64_step_rw(xv_x64_rewriter *const shared_rw) {
-  return XV_RW_ERR;     /* FIXME */
+  /* TODO */
+  return XV_RW_ERR;
 }
 
 /* Generated by SDoc */
