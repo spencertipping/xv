@@ -1,4 +1,4 @@
-XV_CC_OPTS = -Wall -Wno-parentheses -pedantic -std=gnu99
+XV_CC_OPTS = -Wall -Wno-parentheses -std=gnu99
 
 all: xv-x64.o
 

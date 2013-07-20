@@ -32,7 +32,7 @@ int xv_ibuffer_init(xv_x64_ibuffer* const buf) {
   if (region == (void*) -1)
     return errno;
 
-  buf->start = buf->current = (xv_x64_iptr) region;
+  buf->start = buf->current = (xv_x64_i*) region;
   buf->capacity             = page_size;
   return 0;
 }
@@ -46,12 +46,10 @@ int xv_ibuffer_free(xv_x64_ibuffer* const buf) {
   return 0;
 }
 
-int xv_write_insn(xv_x64_ibuffer*   const buf,
-                  xv_x64_const_iptr const insn,
-                  ssize_t           const size) {
-  ssize_t const new_size = (off_t) buf->current
-                         - (off_t) buf->start
-                         + size;
+int xv_write_insn(xv_x64_ibuffer    *const buf,
+                  xv_x64_insn const *const insn) {
+  ssize_t const size     = 0;   /* FIXME */
+  ssize_t const new_size = buf->current - buf->start + size;
 
   /* Note: we're given that buf->capacity is already a multiple of the page
    * size, so new_capacity is also. */
@@ -90,16 +88,11 @@ Instruction rewriter.
 This is where the fun stuff happens. This function steps a rewriter forward by
 one instruction, returning a status code to indicate what should happen next.
 
-#define check_end \
-  do { \
-    if (rw.src >= rw.end) return XV_STEP_END; \
-  } while (0);
-
 int xv_step_rw(xv_x64_rewriter* const shared_rw) {
   /* Make all local changes to our own copy. This lets us easily back out if we
    * hit errors. */
-  xv_x64_rewriter   rw     = *shared_rw;
-  xv_x64_const_iptr istart =  shared_rw->src;
+  xv_x64_rewriter       rw     = *shared_rw;
+  xv_x64_const_i *const istart =  shared_rw->src.start;
 
   int address_size_prefix = 0;
 
@@ -107,42 +100,15 @@ int xv_step_rw(xv_x64_rewriter* const shared_rw) {
    * with the exception of address size (0x67). */
   for (int prefix_1_seen = 0, prefix_2_seen = 0, g1p, g2p,
            prefix_3_seen = 0, prefix_4_seen = 0, g3p, g4p;
-       rw.src < rw.end &&
-         (prefix_1_seen ^ (g1p |= XV_G1P(rw.src)) ||
-          prefix_2_seen ^ (g2p |= XV_G2P(rw.src)) ||
-          prefix_3_seen ^ (g3p |= XV_G3P(rw.src)) ||
-          prefix_4_seen ^ (g4p |= XV_G4P(rw.src)));
-       ++rw.src,
+       rw.src.current - rw.src.start < rw.src.capacity &&
+         (prefix_1_seen ^ (g1p |= XV_G1P(rw.src.start)) ||
+          prefix_2_seen ^ (g2p |= XV_G2P(rw.src.start)) ||
+          prefix_3_seen ^ (g3p |= XV_G3P(rw.src.start)) ||
+          prefix_4_seen ^ (g4p |= XV_G4P(rw.src.start)));
+       ++rw.src.start,
        prefix_1_seen = g1p, prefix_2_seen = g2p,
        prefix_3_seen = g3p, prefix_4_seen = g4p)
     address_size_prefix = prefix_3_seen;
 
-  check_end;
-
-  /* Now we're past the regular prefixes, but we may have a REX byte. */
-  xv_x64_const_iptr const rex =
-    XV_REXP(rw.src) ? rw.src++ : NULL;
-
-  xv_x64_const_iptr const vex3 =
-    !rex && XV_VEX3P(rw.src) ? (rw.src += 3) - 3 : NULL;
-
-  xv_x64_const_iptr const vex2 =
-    !rex && !vex3 && XV_VEX2P(rw.src) ? (rw.src += 2) - 2 : NULL;
-
-  check_end;
-
-  /* Now we can parse the opcode. */
-  xv_x64_const_iptr const opesc1 = XV_OPESC1P(rw.src) ? rw.src++ : NULL;
-  check_end;
-
-  xv_x64_const_iptr const opesc2 =
-    opesc1 && XV_OPESC2P(rw.src) ? rw.src++ : NULL;
-
-  xv_x64_const_iptr const op = rw.src++;
-
-  /* Figure out what kind of addressing mode we're using and parse the
-   * remaining bytes. */
-
+  return XV_RW_ERR;     /* FIXME */
 }
-
-#undef check_end
