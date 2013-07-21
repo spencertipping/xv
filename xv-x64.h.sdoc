@@ -206,7 +206,17 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *buf,
 /* Possible return values for xv_x64_read_insn */
 #define XV_READ_ERR  -1 /* internal error; read errno */
 #define XV_READ_CONT  0 /* no problems; can read next instruction */
-#define XV_READ_END   1 /* hit end of stream (source is invalid) */
+#define XV_READ_ENDP  1 /* hit end of stream, expecting prefix */
+#define XV_READ_ENDV2 2 /* hit end of stream, expecting VEX byte 2 */
+#define XV_READ_ENDV3 3 /* hit end of stream, expecting VEX byte 3 */
+#define XV_READ_ENDO1 4 /* hit end of stream, expecting opcode (no [RV]EX) */
+#define XV_READ_ENDO2 5 /* hit end of stream, expecting opcode (got [RV]EX) */
+#define XV_READ_ENDO3 6 /* hit end of stream, expecting opcode prefix 2 */
+#define XV_READ_ENDO4 7 /* hit end of stream, expecting actual opcode */
+#define XV_READ_ENDM  8 /* hit end of stream, expecting ModR/M byte */
+#define XV_READ_ENDS  9 /* hit end of stream, expecting SIB byte */
+#define XV_READ_ENDD 10 /* hit end of stream, expecting displacement */
+#define XV_READ_ENDI 11 /* hit end of stream, expecting immediate */
 
 /* Rewrite a single instruction from src to dst, updating either both or
  * neither */

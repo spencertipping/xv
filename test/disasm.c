@@ -16,7 +16,10 @@ int main(int const argc, char const *const *const argv) {
   if (fstat(fd, &s)) return 2;
 
   xv_x64_const_ibuffer buf;
-  buf.start    = mmap(NULL, s.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+  buf.current = buf.start
+              = mmap(NULL, s.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+
+  buf.logical_start = 0;
   buf.capacity = s.st_size;
   if (buf.start == (void *const) -1) return 3;
 
@@ -33,6 +36,12 @@ int main(int const argc, char const *const *const argv) {
            insn.rip,
            insn.opcode,
            insn.escape);
+
+  printf("after loop\n");
+  printf("rip: %04x, opcode: %02x, escape: %d\n",
+         insn.rip,
+         insn.opcode,
+         insn.escape);
 
   printf("last status code: %d\n", status);
 

@@ -267,15 +267,14 @@ static inline int xv_x64_immediate_bytes(xv_x64_insn const *const insn) {
 
 int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
                      xv_x64_insn          *const insn) {
-  int const initial_offset = buf->current - buf->start;
-  int       offset         = initial_offset;
+  int offset = buf->current - buf->start;
 
   memset(insn, 0, sizeof(xv_x64_insn));
 
   /* Look for group 1, 2, 3, and 4 prefixes, ignoring each one after we see the
    * first. We're done looking if we hit the end of the input stream, or if we
    * see anything that isn't a prefix. */
-  if (offset >= buf->capacity) return XV_READ_END;
+  if (offset >= buf->capacity) return XV_READ_ENDP;
   for (unsigned g1p, g2p, g3p, g4p, current = buf->start[offset];
 
        offset < buf->capacity
@@ -300,36 +299,38 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 
   /* Now look for REX and VEX prefixes. If there are multiple (technically
    * disallowed), we will get wonky results. */
-  if (offset >= buf->capacity) return XV_READ_END;
-  for (unsigned rexp, vex2p, vex3p, current = buf->start[offset];
+  if (offset >= buf->capacity) return XV_READ_ENDO1;
+  for (unsigned rexp  = 0, vex2p   = 0,
+                vex3p = 0, current = buf->start[offset];
 
        offset < buf->capacity
-         && ((rexp  =  XV_REXP(current)) ||
+         && ((rexp  =  XV_REXP(current = buf->start[offset])) ||
              (vex2p = XV_VEX2P(current)) ||
              (vex3p = XV_VEX3P(current)));
 
        ++offset,
        insn->vex   |= vex2p || vex3p,
        insn->rex_w |= rexp && !!(current & 0x08),
-       insn->r1    |= rexp && (current & 0x04) << 1,    /* REX.R */
-       insn->index |= rexp && (current & 0x02) << 2,    /* REX.X */
-       insn->base  |= rexp && (current & 0x01) << 3)    /* REX.B */
+       insn->r1    |= rexp &&   (current & 0x04) << 1,  /* REX.R */
+       insn->index |= rexp &&   (current & 0x02) << 2,  /* REX.X */
+       insn->base  |= rexp &&   (current & 0x01) << 3,  /* REX.B */
+       rexp = vex2p = vex3p = 0)
 
     if (vex2p || vex3p) {
       if (vex2p) {
-        if (++offset >= buf->capacity) return XV_READ_END;
+        if (++offset >= buf->capacity) return XV_READ_ENDV2;
         current = buf->start[offset];
         insn->escape = XV_INSN_ESC1;                    /* implied */
         insn->r1     = !(current & 0x80) << 3;          /* VEX.R */
       } else if (vex3p) {
-        if (++offset >= buf->capacity) return XV_READ_END;
+        if (++offset >= buf->capacity) return XV_READ_ENDV2;
         current = buf->start[offset];
         insn->r1     = !(current & 0x80) << 3;          /* VEX.R */
         insn->index  = !(current & 0x40) << 3;          /* VEX.X */
         insn->base   = !(current & 0x20) << 3;          /* VEX.B */
         insn->escape = current & 0x1f;                  /* VEX.m-mmmm */
 
-        if (++offset >= buf->capacity) return XV_READ_END;
+        if (++offset >= buf->capacity) return XV_READ_ENDV3;
         current = buf->start[offset];
         insn->rex_w = !!(current & 0x80);               /* VEX.W */
       }
@@ -344,17 +345,19 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 
   /* By this point we've read all prefixes except for opcode escapes. Now look
    * for those. */
-  if (++offset >= buf->capacity) return XV_READ_END;
-  for (unsigned current = buf->start[offset];
-       offset < buf->capacity
-         && (!insn->escape     && (insn->escape |= XV_OPESC1P(current)) ||
-             insn->escape == 1
-               && (insn->escape = current == 0x38 ? XV_INSN_ESC238
-                                : current == 0x3a ? XV_INSN_ESC23A
-                                : insn->escape));
-      ++offset);
+  if (offset >= buf->capacity) return XV_READ_ENDO2;
+  if (XV_OPESC1P(buf->start[offset])) {
+    /* We have a 0x0f prefix; now see whether we have either 0x38 or 0x3a */
+    if (++offset >= buf->capacity) return XV_READ_ENDO3;
 
-  if (offset >= buf->capacity) return XV_READ_END;
+    unsigned current = buf->start[offset];
+    if (XV_OPESC2P(current)) {
+      insn->escape = current == 0x38 ? XV_INSN_ESC238 : XV_INSN_ESC23A;
+      if (++offset >= buf->capacity) return XV_READ_ENDO4;
+    } else
+      insn->escape = 1;
+  }
+
   insn->opcode = buf->start[offset];
 
   /* Now we have the opcode and all associated prefixes, so we can parse out
@@ -364,7 +367,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 
   /* If we use ModR/M, parse that byte and check for SIB. */
   if (enc & XV_MODRM_MASK) {
-    if (++offset >= buf->capacity) return XV_READ_END;
+    if (++offset >= buf->capacity) return XV_READ_ENDM;
     unsigned current = buf->start[offset];
     insn->mod  = (current & 0xc0) >> 6;
     insn->r1  |= (current & 0x38) >> 3;
@@ -375,7 +378,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
         : insn->mod == 2 ? 4 : 0;
 
     if (insn->mod != 3 && (current & 0x07) == 4) {
-      if (++offset >= buf->capacity) return XV_READ_END;
+      if (++offset >= buf->capacity) return XV_READ_ENDS;
       current = buf->start[offset];
       insn->scale  = (current & 0xc0) >> 6;
       insn->index |= (current & 0x38) >> 3;
@@ -384,14 +387,14 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
     insn->base |= current & 0x07;
 
     /* Now read little-endian displacement. */
-    if ((offset += displacement_bytes) >= buf->capacity) return XV_READ_END;
+    if ((offset += displacement_bytes) >= buf->capacity) return XV_READ_ENDD;
     for (int i = 0; i < displacement_bytes; ++i)
       insn->displacement = insn->displacement << 8 | buf->start[offset - i];
   }
 
   /* And read the immediate data, little-endian. */
   int const immediate_size = xv_x64_immediate_bytes(insn);
-  if ((offset += immediate_size) >= buf->capacity) return XV_READ_END;
+  if ((offset += immediate_size) >= buf->capacity) return XV_READ_ENDI;
   for (int i = 0; i < immediate_size; ++i)
     insn->immediate = insn->immediate << 8 | buf->start[offset - i];
 
