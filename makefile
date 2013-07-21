@@ -1,4 +1,4 @@
-XV_CC_OPTS = -Wall -Wno-parentheses -std=gnu99
+XV_CC_OPTS = -Wall -Wno-parentheses -Wno-unused-value -std=gnu99
 XV_OBJ     = build/xv-x64.o
 XV_TEST    = test/disasm test/disasm.bin
 
@@ -20,9 +20,14 @@ build/%.c: %.c.sdoc
 	chmod -w $@
 
 build/%.h: %.h.sdoc
+	mkdir -p build
 	rm -f $@
 	sdoc cat code.h::$< > $@
 	chmod -w $@
 
 build/xv-x64.c: build/xv-x64.h
 build/xv-x64.h: build/xv.h
+
+.PHONY: clean
+clean:
+	rm -rf build

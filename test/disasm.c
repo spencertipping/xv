@@ -24,7 +24,9 @@ int main(int const argc, char const *const *const argv) {
   if (buf.start == (void *const) -1) return 3;
 
   printf("initialized buffer; printing bytes...\n");
-  for (int i = 0; i < buf.capacity; ++i)
+  for (int i = 0;
+       i < buf.capacity;
+       ++i & 0x0f || printf("\n"))
     printf("%02x ", buf.start[i]);
 
   printf("\n");
@@ -32,20 +34,20 @@ int main(int const argc, char const *const *const argv) {
   xv_x64_insn insn;
   int status;
   while (!(status = xv_x64_read_insn(&buf, &insn)))
-    printf("rip: %04x, opcode: %02x, escape: %d\n",
-           insn.rip,
-           insn.opcode,
-           insn.escape);
+    printf("rip: %04lx, opcode: %02lx, escape: %ld\n",
+           (uint64_t) insn.rip,
+           (uint64_t) insn.opcode,
+           (uint64_t) insn.escape);
 
   printf("after loop\n");
-  printf("rip: %04x, opcode: %02x, escape: %d\n",
-         insn.rip,
-         insn.opcode,
-         insn.escape);
+  printf("rip: %04lx, opcode: %02lx, escape: %ld\n",
+         (uint64_t) insn.rip,
+         (uint64_t) insn.opcode,
+         (uint64_t) insn.escape);
 
   printf("last status code: %d\n", status);
 
-  munmap(buf.start, buf.capacity);
+  munmap((void*) buf.start, buf.capacity);
   close(fd);
   return 0;
 }
