@@ -408,11 +408,78 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 }
 
 Instruction generator.
-Write a structured instruction back out as x86 machine code.
+Write a structured instruction back out as x86 machine code. To do this, we
+first size out the instruction and then, assuming there's space, copy the
+memory. The buffer will be unchanged if any errors occur.
+
+Note that we rely entirely on the .vex field to tell us whether we should
+VEX-encode the instruction. This means that instructions are closed under VEX
+encoding, so xv will at the very least not VEX-encode stuff on a processor that
+would have run the program otherwise.
+
+static xv_x64_const_i xv_g1v[4] = { 0x00, 0xf0, 0xf2, 0xf3 };
+static xv_x64_const_i xv_g2v[7] = { 0x00, 0x2e, 0x36, 0x3e, 0x26, 0x64, 0x65 };
 
 int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
                       xv_x64_insn const *const insn) {
+  xv_x64_i stage[15] = { 0 };   /* we build the machine code here */
+  unsigned index     = 0;
+
+  /* Reconstruct group 1, 2, 3, and 4 prefixes */
+  if (insn->p1) stage[index++] = xv_g1v[insn->p1];
+  if (insn->p2) stage[index++] = xv_g2v[insn->p2];
+  if (insn->p66) stage[index++] = 0x66;
+  if (insn->p67) stage[index++] = 0x67;
+
+  /* Encode any REX or VEX prefix */
+  if (insn->vex) {
+    /* Preserve VEX */
+    xv_x64_i const vvvv_l_pp = (~insn->r3 & 0x0f) << 3
+                             | insn->vex_l        << 2
+                             | insn->escape;
+
+    if (insn->escape != XV_INSN_ESC1
+        || insn->rex_w
+        || 0x08 & (insn->index | insn->base | insn->r1))
+      /* Need a three-byte prefix */
+      stage[index++] = 0xc4,
+      stage[index++] = (1 & ~insn->r1    >> 3) << 7
+                     | (1 & ~insn->index >> 3) << 6
+                     | (1 & ~insn->base  >> 3) << 5
+                     | insn->escape,
+      stage[index++] = insn->rex_w << 7 | vvvv_l_pp;
+    else
+      /* Two-byte prefix */
+      stage[index++] = 0xc5,
+      stage[index++] = (1 & ~insn->r1 >> 3) << 7 | vvvv_l_pp;
+  } else {
+    if (insn->rex_w
+        || 0x08 & (insn->r1 | insn->index | insn->base))
+      /* REX is required */
+      stage[index++] = 0x40
+                     | insn->rex_w            << 3
+                     | (1 & insn->r1    >> 3) << 2
+                     | (1 & insn->index >> 3) << 1
+                     | (1 & insn->base  >> 3) << 0;
+
+    /* Opcode escaping: VEX captures this information inside the prefix, but
+     * REX and no-prefix forms require us to write escape bytes */
+    switch (insn->escape) {
+      case XV_INSN_ESC0:   break;
+      case XV_INSN_ESC1:   stage[index++] = 0x0f; break;
+      case XV_INSN_ESC238: stage[index++] = 0x0f; stage[index++] = 0x38; break;
+      case XV_INSN_ESC23A: stage[index++] = 0x0f; stage[index++] = 0x3a; break;
+    }
+  }
+
+  stage[index++] = insn->opcode;
+
+  /* Now encode operands. We need to choose ModR/M and SIB encodings that are
+   * large enough to handle the displacement and scale/index/base registers. We
+   * don't, however, need to worry about the immediate data; we assume that the
+   * opcode is correctly specified. */
   /* TODO */
+
   return XV_WR_ERR;
 }
 
@@ -425,9 +492,8 @@ inline int xv_x64_riprelp(xv_x64_insn const *const insn) {
 }
 
 inline int xv_x64_immrelp(xv_x64_insn const *const insn) {
-  xv_x64_insn_encoding const enc =
-    xv_x64_insn_encodings[xv_x64_insn_key(insn)];
-  unsigned const imm = enc & XV_IMM_MASK;
+  xv_x64_insn_encoding const enc = xv_x64_insn_encodings[xv_x64_insn_key(insn)];
+  unsigned             const imm = enc & XV_IMM_MASK;
   return imm == XV_IMM_D8
       || imm == XV_IMM_D32
       || imm == XV_IMM_DSZW;
