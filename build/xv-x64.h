@@ -135,27 +135,43 @@ struct xv_x64_insn {
   unsigned int vex    : 1;      /* encoded with vex? (changes semantics) */
   unsigned int vex_l  : 1;
   unsigned int escape : 2;      /* opcode prefix type */
-  unsigned int        : 5;
 
   unsigned int opcode : 8;      /* opcode byte */
 
-  unsigned int mod : 2;         /* ModR/M high bits */
-  unsigned int r1  : 4;         /* ModR/M reg field (with REX/VEX bit) */
-  unsigned int r3  : 4;         /* r3 is present only with VEX */
-
-  unsigned int scale : 2;       /* SIB byte encoding */
-  unsigned int index : 4;
-  unsigned int base  : 4;       /* the /m part of ModR/M if no SIB */
+  unsigned int addr   : 2;      /* normal, absolute addr, %rip-relative */
+  unsigned int mod    : 2;      /* ModR/M high bits */
+  unsigned int r1     : 4;      /* ModR/M reg field (with REX/VEX bit) */
+  unsigned int base   : 4;      /* the r/m part of ModR/M if no SIB */
+  unsigned int r3     : 4;      /* r3 is present only with VEX */
+  unsigned int scale  : 2;      /* SIB byte encoding */
+  unsigned int index  : 4;
 
   int32_t displacement;         /* memory displacement, up to 32 bits */
   int64_t immediate;            /* sometimes memory offset (e.g. JMP) */
 };
+
+/* xv_x64_insn register values */
+#define XV_RAX 0
+#define XV_RCX 1
+#define XV_RDX 2
+#define XV_RBX 3
+#define XV_RSP 4
+#define XV_RBP 5
+#define XV_RSI 6
+#define XV_RDI 7
+
+#define XV_NO_INDEX XV_RSP
 
 /* xv_x64_insn field values */
 #define XV_INSN_ESC0   0        /* xv_x64_insn.escape */
 #define XV_INSN_ESC1   1        /* two-byte opcode: 0x0f prefix */
 #define XV_INSN_ESC238 2        /* three-byte opcode: 0x0f 0x38 prefix */
 #define XV_INSN_ESC23A 3        /* three-byte opcode: 0x0f 0x3a prefix */
+
+#define XV_INSN_NOINDEX 0       /* xv_x64_insn.addr */
+#define XV_INSN_INDEX   1       /* use an index register */
+#define XV_INSN_RIPREL  2       /* %rip-relative addressing */
+#define XV_INSN_ABS     3       /* absolute address */
 
 #define XV_INSN_LOCK  1         /* xv_x64_insn.p1 */
 #define XV_INSN_REPNZ 2
@@ -196,6 +212,8 @@ int xv_x64_write_insn(xv_x64_ibuffer    *buf,
 #define XV_WR_ERR  -1   /* internal error; read errno */
 #define XV_WR_CONT  0   /* no problems; can continue writing */
 #define XV_WR_END   1   /* hit end of buffer; you need to reallocate */
+#define XV_WR_EOP   2   /* invalid operands for opcode */
+#define XV_WR_INV   3   /* opcode is invalid for x86-64 */
 
 /* Read a single instruction from the given const buffer, advancing the buffer
  * in the process. Writes result into *insn. If errors occur, *insn has
@@ -217,16 +235,16 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *buf,
 #define XV_READ_ENDS  9 /* hit end of stream, expecting SIB byte */
 #define XV_READ_ENDD 10 /* hit end of stream, expecting displacement */
 #define XV_READ_ENDI 11 /* hit end of stream, expecting immediate */
+#define XV_READ_INV  12 /* opcode was invalid for x86-64 */
 
 /* Rewrite a single instruction from src to dst, updating either both or
  * neither */
 int xv_x64_step_rw(xv_x64_rewriter* rw);
 
 /* Possible return values for xv_x64_step_rw */
-#define XV_RW_ERR  -1   /* internal error; read errno */
 #define XV_RW_CONT  0   /* no problems; can continue */
-#define XV_RW_ENDI  1   /* hit end of input; stream is invalid */
-#define XV_RW_ENDO  2   /* hit end of output; you need to reallocate */
+#define XV_RW_R 0x100   /* error from read_insn; see low byte for code */
+#define XV_RW_W 0x200   /* error from write_insn; see low byte for code */
 
 /* Operand encodings. */
 /* These are used for two purposes. First, we need them to indicate the length of */

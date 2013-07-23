@@ -359,6 +359,8 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
   }
 
   insn->opcode = buf->start[offset];
+  if (xv_x64_insn_encodings[xv_x64_insn_key(insn)] == XV_INVALID)
+    return XV_READ_INV;
 
   /* Now we have the opcode and all associated prefixes, so we can parse out
    * the remaining bytes using the operand encoding table. */
@@ -369,19 +371,25 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
   if (enc & XV_MODRM_MASK) {
     if (++offset >= buf->capacity) return XV_READ_ENDM;
     unsigned current = buf->start[offset];
-    insn->mod  = (current & 0xc0) >> 6;
-    insn->r1  |= (current & 0x38) >> 3;
+    insn->mod   = (current & 0xc0) >> 6;
+    insn->r1   |= (current & 0x38) >> 3;
 
-    int displacement_bytes =
-          insn->mod == 0 ? (current & 0x07) == 5 ? 4 : 0
-        : insn->mod == 1 ? 1
-        : insn->mod == 2 ? 4 : 0;
+    /* Detect special encoding for absolute-mode address */
+    if (insn->mod == 0 && (current & 0x07) == XV_RBP)
+      insn->addr = XV_INSN_RIPREL;
 
-    if (insn->mod != 3 && (current & 0x07) == 4) {
+    int const displacement_bytes =
+        insn->mod == 0 ? (current & 0x07) == 5 ? 4 : 0
+      : insn->mod == 1 ? 1
+      : insn->mod == 2 ? 4 : 0;
+
+    if (insn->mod != 3 && (current & 0x07) == XV_RSP) {
       if (++offset >= buf->capacity) return XV_READ_ENDS;
       current = buf->start[offset];
       insn->scale  = (current & 0xc0) >> 6;
       insn->index |= (current & 0x38) >> 3;
+
+      /* TODO: detect special cases */
     }
 
     insn->base |= current & 0x07;
@@ -420,14 +428,32 @@ would have run the program otherwise.
 static xv_x64_const_i xv_g1v[4] = { 0x00, 0xf0, 0xf2, 0xf3 };
 static xv_x64_const_i xv_g2v[7] = { 0x00, 0x2e, 0x36, 0x3e, 0x26, 0x64, 0x65 };
 
+/* Return nonzero if the quantity stored in x overflows the given number of
+ * bits; also works for unsigned data */
+static inline int xv_overflowp(int64_t  const x,
+                               unsigned const bits) {
+  int64_t const high = x >> bits;
+  return high == 0 || high == -1;
+}
+
 int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
                       xv_x64_insn const *const insn) {
-  xv_x64_i stage[15] = { 0 };   /* we build the machine code here */
-  unsigned index     = 0;
+  xv_x64_i                   stage[15] = { 0 };
+  unsigned                   index     = 0;
+  xv_x64_insn_encoding const enc       =
+    xv_x64_insn_encodings[xv_x64_insn_key(insn)];
+
+  /* Validity check: is the opcode known to be invalid? */
+  if (enc == XV_INVALID) return XV_WR_INV;
+
+  /* Validity check: are we trying to encode an immediate larger than what the
+   * instruction supports? */
+  if (xv_overflowp(insn->immediate, 8 * xv_x64_immediate_bytes(insn)))
+    return XV_WR_EOP;
 
   /* Reconstruct group 1, 2, 3, and 4 prefixes */
-  if (insn->p1) stage[index++] = xv_g1v[insn->p1];
-  if (insn->p2) stage[index++] = xv_g2v[insn->p2];
+  if (insn->p1)  stage[index++] = xv_g1v[insn->p1];
+  if (insn->p2)  stage[index++] = xv_g2v[insn->p2];
   if (insn->p66) stage[index++] = 0x66;
   if (insn->p67) stage[index++] = 0x67;
 
@@ -453,8 +479,7 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
       stage[index++] = 0xc5,
       stage[index++] = (1 & ~insn->r1 >> 3) << 7 | vvvv_l_pp;
   } else {
-    if (insn->rex_w
-        || 0x08 & (insn->r1 | insn->index | insn->base))
+    if (insn->rex_w || 0x08 & (insn->r1 | insn->index | insn->base))
       /* REX is required */
       stage[index++] = 0x40
                      | insn->rex_w            << 3
@@ -474,11 +499,56 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
 
   stage[index++] = insn->opcode;
 
-  /* Now encode operands. We need to choose ModR/M and SIB encodings that are
-   * large enough to handle the displacement and scale/index/base registers. We
-   * don't, however, need to worry about the immediate data; we assume that the
-   * opcode is correctly specified. */
-  /* TODO */
+  /* Now encode operands. This is a matter of a few things. First, we need to
+   * figure out the x86 way to express what is logically encoded in the operand
+   * data. For example, we may have a %rip-relative address, which is encoded
+   * as a special case of ModR/M and SIB. */
+  if (enc & XV_MODRM_MASK) {
+    xv_x64_i const reg = insn->r1 << 3 & 0x38;
+
+    /* Figure out what kind of ModR/M and SIB setup to use. Here are the
+     * possibilities:
+     *
+     * 1. Absolute addressing: use SIB with index = %rsp.
+     * 2. Instruction is %rip-relative: mod = 0, r/m = %rbp.
+     * 3. %rsp or %r12 is base: use SIB with scale = 0.
+     * 4. %rbp or %r13 is base: force displacement encoding.
+     *
+     * Otherwise, we can encode the instruction as specified. */
+
+    unsigned displacement_bytes = 0;
+    switch (insn->addr) {
+      case XV_INSN_RIPREL:
+        stage[index++] = XV_RBP | reg;
+        displacement_bytes = 4;
+        break;
+
+      case XV_INSN_ABS:
+        displacement_bytes = xv_overflowp(insn->displacement, 1) ? 4 : 1;
+        stage[index++] = (displacement_bytes == 4 ? 0x80 : 0x40)
+                       | reg
+                       | XV_RSP;
+        stage[index++] = insn->scale << 6
+                       | insn->index << 3 & 0x38
+                       | insn->base       & 0x07;
+        break;
+
+      default:
+        /* No known-wonky cases yet, but some that still require escaping.
+         * Check for those: */
+        if (insn->base & 0x07 == XV_RSP) {
+          /* TODO */
+        }
+    }
+
+    if (xv_overflowp(insn->displacement, displacement_bytes * 8))
+      return XV_WR_EOP;
+
+    --displacement_bytes;
+    for (int i = 0; i <= displacement_bytes; ++i)
+      stage[index++] =
+        insn->displacement >> (displacement_bytes - i << 3) & 0xff;
+  }
 
   return XV_WR_ERR;
 }
@@ -488,7 +558,7 @@ This is where the fun stuff happens. This function steps a rewriter forward by
 one instruction, returning a status code to indicate what should happen next.
 
 inline int xv_x64_riprelp(xv_x64_insn const *const insn) {
-  return insn->mod == 0 && insn->base == 5;
+  return insn->mod == 0 && insn->base == XV_RSP;
 }
 
 inline int xv_x64_immrelp(xv_x64_insn const *const insn) {
@@ -509,5 +579,5 @@ inline int xv_x64_syscallp(xv_x64_insn const *const insn) {
 
 int xv_x64_step_rw(xv_x64_rewriter *const shared_rw) {
   /* TODO */
-  return XV_RW_ERR;
+  return XV_RW_R;
 }
