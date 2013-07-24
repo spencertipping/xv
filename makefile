@@ -1,8 +1,10 @@
 XV_CC_OPTS = -Wall -Wno-parentheses -Wno-unused-value -std=gnu99
 XV_OBJ     = build/xv-x64.o
 XV_TEST    = test/disasm test/disasm.bin
+XV_DOC     = $(subst .sdoc,.md,$(wildcard *.sdoc))
 
-all: $(XV_TEST)
+all: $(XV_TEST) $(XV_DOC)
+doc: $(XV_DOC)
 
 test/%: test/%.c $(XV_OBJ)
 	$(CC) $(CC_OPTS) $(XV_CC_OPTS) $< $(XV_OBJ) -o $@
@@ -12,6 +14,9 @@ test/%.bin: test/%.o
 
 %.o: %.c makefile
 	$(CC) $(CC_OPTS) $(XV_CC_OPTS) $< -c -o $@
+
+%.md: %.sdoc
+	sdoc cat markdown::$< > $@
 
 build/%.c: %.c.sdoc
 	mkdir -p build

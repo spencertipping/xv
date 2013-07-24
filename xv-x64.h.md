@@ -1,177 +1,213 @@
-/* XV instruction stream rewriter: x86-64 */
-/* Copyright (C) 2013, Spencer Tipping */
-/* Released under the terms of the GPLv3: http://www.gnu.org/licenses/gpl-3.0.txt */
+XV instruction stream rewriter: x86-64
+Copyright (C) 2013, Spencer Tipping
+Released under the terms of the GPLv3: http://www.gnu.org/licenses/gpl-3.0.txt
 
-/* Introduction. */
-/* This file provides all definitions relevant to instruction stream rewriting for */
-/* x86-64 instructions. It assumes that the instruction stream is being */
-/* interpreted in 64-bit mode, not 32-bit compatibility mode. */
+# Introduction
 
+This file provides all definitions relevant to instruction stream rewriting for
+x86-64 instructions. It assumes that the instruction stream is being
+interpreted in 64-bit mode, not 32-bit compatibility mode.
+
+```h
 #ifndef XV_X64_H
 #define XV_X64_H
+```
 
+```h
 #include "xv.h"
+```
 
+```h
 #include <elf.h>
 #include <stdint.h>
 #include <sys/types.h>
+```
 
+```h
 #define forward_struct(name) \
   struct name; \
   typedef struct name name;
+```
 
+```h
 forward_struct(xv_x64_ibuffer)
 forward_struct(xv_x64_const_ibuffer)
 forward_struct(xv_x64_rewriter)
 forward_struct(xv_x64_insn)
 forward_struct(xv_x64_bblock)
 forward_struct(xv_x64_bblock_list)
+```
 
+```h
 #undef forward_struct
+```
 
-/* Rewriting strategy. */
-/* Rewriting is a closed transformation: i.e. there is no runtime interaction that */
-/* needs to happen to maintain the abstraction. The only exception is runtime code */
-/* generation, which is detected by listening for segfaults against the */
-/* write-protected original code. (Any such segfault invalidates the cached */
-/* basic-blocks that refer to it.) */
+# Rewriting strategy
 
-/* Internally, the transformation consists of rewriting the code to preserve the */
-/* invariant that all addressing logic is done using unmodified addresses. For */
-/* absolute addresses this is trivial, and for %rip-relative addressing it means */
-/* adjusting (or adding) the displacement for each memory-accessing instruction. */
+Rewriting is a closed transformation: i.e. there is no runtime interaction that
+needs to happen to maintain the abstraction. The only exception is runtime code
+generation, which is detected by listening for segfaults against the
+write-protected original code. (Any such segfault invalidates the cached
+basic-blocks that refer to it.)
 
-/* Syscall opcodes, of which there are three, are each rewritten as calls into */
-/* libxv. These calls aren't standard C calls; they're literally x86-64 CALL */
-/* instructions that go to a receiver site in libxv. This receiver site then reads */
-/* the relevant registers and performs or emulates the system call itself. */
+Internally, the transformation consists of rewriting the code to preserve the
+invariant that all addressing logic is done using unmodified addresses. For
+absolute addresses this is trivial, and for %rip-relative addressing it means
+adjusting (or adding) the displacement for each memory-accessing instruction.
 
+Syscall opcodes, of which there are three, are each rewritten as calls into
+libxv. These calls aren't standard C calls; they're literally x86-64 CALL
+instructions that go to a receiver site in libxv. This receiver site then reads
+the relevant registers and performs or emulates the system call itself.
+
+```h
 typedef uint8_t       xv_x64_i;         /* absolutely must be unsigned */
 typedef uint8_t const xv_x64_const_i;
+```
 
-/* Buffers. */
-/* The only interesting thing going on here is that we have two start pointers. We */
-/* do this because of an unfortunate confluence of problems: */
+# Buffers
 
-/* | 1. The managing xv process is loaded into memory before the virtualized */
-/*      executable, so it may be hogging addresses mapped by the ELF image. */
-/*   2. We can't move xv because we'd probably also have to move libc itself. */
-/*   3. Although ld-linux.so can move ELF code just fine, the main loadable */
-/*      segment can't be relocated trivially. (At least, that's what it sounds */
-/*      like; I should probably research this more.) */
+The only interesting thing going on here is that we have two start pointers. We
+do this because of an unfortunate confluence of problems:
 
-/* The good news is that there's an easier way to do it. Since we're going to */
-/* rewrite all of the machine code anyway, we don't need to worry about loading */
-/* the original code in the right place. In fact, we don't have to load it at all */
-/* apart from just mapping the ELF file into memory. All we need to do is keep */
-/* track of where the code would have gone, then add the displacements together */
-/* when we generate the new code. */
+    1. The managing xv process is loaded into memory before the virtualized
+       executable, so it may be hogging addresses mapped by the ELF image.
+    2. We can't move xv because we'd probably also have to move libc itself.
+    3. Although ld-linux.so can move ELF code just fine, the main loadable
+       segment can't be relocated trivially. (At least, that's what it sounds
+       like; I should probably research this more.)
 
-/* Note that these logical_start values aren't %rip offsets, they're just memory */
-/* locations. We won't know the %rip offsets until we start decoding stuff. */
+The good news is that there's an easier way to do it. Since we're going to
+rewrite all of the machine code anyway, we don't need to worry about loading
+the original code in the right place. In fact, we don't have to load it at all
+apart from just mapping the ELF file into memory. All we need to do is keep
+track of where the code would have gone, then add the displacements together
+when we generate the new code.
 
+Note that these logical_start values aren't %rip offsets, they're just memory
+locations. We won't know the %rip offsets until we start decoding stuff.
+
+```h
 struct xv_x64_ibuffer {
   xv_x64_const_i *logical_start;        /* code address start */
   xv_x64_i       *start;                /* start of allocated region */
   xv_x64_i       *current;              /* current insertion point */
   ssize_t         capacity;             /* size (bytes) of allocated region */
 };
+```
 
+```h
 struct xv_x64_const_ibuffer {
   xv_x64_const_i *logical_start;
   xv_x64_const_i *start;
   xv_x64_const_i *current;
   ssize_t         capacity;
 };
+```
 
+```h
 struct xv_x64_rewriter {
   xv_x64_const_ibuffer src;             /* original instructions */
   xv_x64_ibuffer       dst;             /* recompiled instruction stream */
   void                *xv_entry_point;  /* system call hook address */
 };
+```
 
+```h
 /* Free any existing buffer memory, then allocate to new size. buf is unchanged
  * if return code is nonzero. */
 int xv_x64_reallocate_ibuffer(xv_x64_ibuffer *buf,
                               ssize_t         size);
+```
 
-/* Instruction metadata. */
-/* Intel opcodes and encodings are generally horrible. Luckily, we can factor away */
-/* most of the weirdness by parsing each instruction into a canonical form. This */
-/* gives us the flexibility to reduce the amount of code on the machine code */
-/* generator end. */
+# Instruction metadata
 
-/* Broadly speaking, here are the structual variants when parsing an instruction: */
+Intel opcodes and encodings are generally horrible. Luckily, we can factor away
+most of the weirdness by parsing each instruction into a canonical form. This
+gives us the flexibility to reduce the amount of code on the machine code
+generator end.
 
-/* | 1. Opcode size (1, 2, or 3 bytes). Total of 1024 opcodes, many unused. */
-/*   2. Mandatory and/or size-changing prefixes. Up to 4 variants per opcode. */
-/*   3. Addressing information, e.g. ModR/M, SIB, disp8 or disp32. */
-/*   4. Immediate data of 1, 2, 4, or 8 bytes. */
+Broadly speaking, here are the structual variants when parsing an instruction:
 
-/* We're moving the code of the process, so we need to identify every */
-/* %rip-relative memory reference (including short jumps, etc -- subtle) and */
-/* modify the displacement of these references so that the code won't know the */
-/* difference. Specifically, we need to always have the code refer to the original */
-/* addresses, fixing things up only when we know it's safe to do so. */
+    1. Opcode size (1, 2, or 3 bytes). Total of 1024 opcodes, many unused.
+    2. Mandatory and/or size-changing prefixes. Up to 4 variants per opcode.
+    3. Addressing information, e.g. ModR/M, SIB, disp8 or disp32.
+    4. Immediate data of 1, 2, 4, or 8 bytes.
 
-/* We can make a few representational optimizations to save some work. For */
-/* example, we don't need to reconstruct the instruction in its original form; if */
-/* the instruction was originally encoded with a redundant VEX prefix and isn't */
-/* using AVX registers, we can easily enough re-encode it with REX. So we need to */
-/* capture the intent, not necessarily the form, of the instruction. */
+We're moving the code of the process, so we need to identify every
+%rip-relative memory reference (including short jumps, etc -- subtle) and
+modify the displacement of these references so that the code won't know the
+difference. Specifically, we need to always have the code refer to the original
+addresses, fixing things up only when we know it's safe to do so.
 
-/* This is also ideal because it gives us a way to uniformly represent memory */
-/* accesses. In this sense our interface is more like an assembler than like a */
-/* machine-code manipulation layer. */
+We can make a few representational optimizations to save some work. For
+example, we don't need to reconstruct the instruction in its original form; if
+the instruction was originally encoded with a redundant VEX prefix and isn't
+using AVX registers, we can easily enough re-encode it with REX. So we need to
+capture the intent, not necessarily the form, of the instruction.
 
-/* Addressing modes. */
-/* Any instruction that has the potential to access memory is very likely to use a */
-/* ModR/M byte. (There are probably exceptions, but they're easy cases.) ModR/M */
-/* has a number of bizarre exceptions and escapes for encoding things. In */
-/* particular, there are magic field values that do things like %rip-relative or */
-/* zero-based absolute addressing, either of which could, conceivably, be present */
-/* in the code we're transforming. */
+This is also ideal because it gives us a way to uniformly represent memory
+accesses. In this sense our interface is more like an assembler than like a
+machine-code manipulation layer.
 
-/* Rather than try to stick with Intel's horked encoding, we're better off */
-/* encoding all of these modes into a single value, insn->addr, which can be any */
-/* of the following: */
+# Addressing modes
 
-/* | XV_ADDR_REG           <- use a register as a value */
-/*   XV_ADDR_RIPREL        <- *(%rip + displacement) */
-/*   XV_ADDR_ZEROREL       <- *displacement */
-/*   XV_ADDR_BASE          <- *(base + displacement) */
-/*   XV_ADDR_SCALE1        <- *(base + 1*index + displacement) */
-/*   XV_ADDR_SCALE2        <- *(base + 2*index + displacement) */
-/*   XV_ADDR_SCALE4        <- *(base + 4*index + displacement) */
-/*   XV_ADDR_SCALE8        <- *(base + 8*index + displacement) */
+Any instruction that has the potential to access memory is very likely to use a
+ModR/M byte. (There are probably exceptions, but they're easy cases.) ModR/M
+has a number of bizarre exceptions and escapes for encoding things. In
+particular, there are magic field values that do things like %rip-relative or
+zero-based absolute addressing, either of which could, conceivably, be present
+in the code we're transforming.
 
-/* Our job, then, is to bidirectionally convert between our sane representation */
-/* and Intel's broken one. The gory details of this are handled in */
-/* `xv_x64_read_insn` and `xv_x64_write_insn`. */
+Rather than try to stick with Intel's horked encoding, we're better off
+encoding all of these modes into a single value, insn->addr, which can be any
+of the following:
 
+    XV_ADDR_REG           <- use a register as a value
+    XV_ADDR_RIPREL        <- use %rip with displacement
+    XV_ADDR_ZEROREL       <- use displacement as absolute
+    XV_ADDR_BASE          <- use base reg, optionally with displacement
+    XV_ADDR_SCALE1        <- use 1-byte scaling of index reg
+    XV_ADDR_SCALE2        <- use 2-byte scaling of index reg
+    XV_ADDR_SCALE4        <- use 4-byte scaling of index reg
+    XV_ADDR_SCALE8        <- use 8-byte scaling of index reg
+
+```h
 struct xv_x64_insn {
   void const *rip;              /* %rip of original instruction */
+```
 
-  unsigned p1     : 2;          /* group-1 instruction prefix */
-  unsigned p2     : 3;          /* group-2 instruction prefix */
-  unsigned p66    : 1;          /* 0x66 prefix? */
-  unsigned p67    : 1;          /* 0x67 prefix? */
-  unsigned rex_w  : 1;          /* presence of REX.W (can exist with VEX) */
-  unsigned vex    : 1;          /* encoded with vex? (changes semantics) */
-  unsigned vex_l  : 1;          /* presence of VEX.L (implies VEX) */
+```h
+  unsigned int p1     : 2;
+  unsigned int p2     : 3;
+  unsigned int p66    : 1;
+  unsigned int p67    : 1;
+  unsigned int rex_w  : 1;
+  unsigned int vex    : 1;      /* encoded with vex? (changes semantics) */
+  unsigned int vex_l  : 1;
+  unsigned int escape : 2;      /* opcode prefix type */
+```
 
-  unsigned escape : 2;          /* opcode prefix type */
-  unsigned opcode : 8;          /* opcode byte */
+```h
+  unsigned int opcode : 8;      /* opcode byte */
+```
 
-  unsigned addr   : 3;          /* addressing mode */
-  unsigned reg    : 4;          /* primary operand register (always reg) */
-  unsigned base   : 4;          /* secondary operand register or mem offset */
-  unsigned index  : 4;          /* indexing register, if used */
-  unsigned aux    : 4;          /* third register, only if VEX is used */
+```h
+  unsigned int mod    : 2;      /* ModR/M high bits */
+  unsigned int scale  : 2;      /* SIB byte encoding */
+  unsigned int r1     : 5;      /* ModR/M reg field (with REX/VEX bit) */
+  unsigned int base   : 5;      /* the r/m part of ModR/M if no SIB */
+  unsigned int r3     : 5;      /* r3 is present only with VEX */
+  unsigned int index  : 5;
+```
+
+```h
   int32_t displacement;         /* memory displacement, up to 32 bits */
   int64_t immediate;            /* sometimes memory offset (e.g. JMP) */
 };
+```
 
+```h
 /* xv_x64_insn register values */
 #define XV_RAX 0
 #define XV_RCX 1
@@ -181,67 +217,99 @@ struct xv_x64_insn {
 #define XV_RBP 5
 #define XV_RSI 6
 #define XV_RDI 7
-/* r8-r15: 8-15 */
+```
 
+```h
+/* r8-r15: 8-15 */
+```
+
+```h
+#define XV_NO_REG 0x10
+#define XV_RIP    0x11
+```
+
+```h
 /* xv_x64_insn field values */
 #define XV_INSN_ESC0   0        /* xv_x64_insn.escape */
 #define XV_INSN_ESC1   1        /* two-byte opcode: 0x0f prefix */
 #define XV_INSN_ESC238 2        /* three-byte opcode: 0x0f 0x38 prefix */
 #define XV_INSN_ESC23A 3        /* three-byte opcode: 0x0f 0x3a prefix */
+```
 
+```h
 #define XV_INSN_NOINDEX 0       /* xv_x64_insn.addr */
 #define XV_INSN_INDEX   1       /* use an index register */
 #define XV_INSN_RIPREL  2       /* %rip-relative addressing */
 #define XV_INSN_ABS     3       /* absolute address */
+```
 
+```h
 #define XV_INSN_LOCK  1         /* xv_x64_insn.p1 */
 #define XV_INSN_REPNZ 2
 #define XV_INSN_REPZ  3
+```
 
+```h
 #define XV_INSN_CS 1            /* xv_x64_insn.p2 */
 #define XV_INSN_SS 2            /* note that CS == branch not taken, */
 #define XV_INSN_DS 3            /*           DS == branch taken */
 #define XV_INSN_ES 4
 #define XV_INSN_FS 5
 #define XV_INSN_GS 6
+```
 
+```h
 /* Instruction table index of given insn */
 #define xv_x64_insn_key(insn_ptr) \
   ({ \
     xv_x64_insn const _insn = *(insn_ptr); \
     _insn.opcode | _insn.escape << 2; \
   })
+```
 
+```h
 /* Returns nonzero if the instruction's memory operand is %rip-relative */
 int xv_x64_riprelp(xv_x64_insn const *insn);
+```
 
+```h
 /* Returns nonzero if the instruction's immediate operand is a %rip-relative
  * memory displacement */
 int xv_x64_immrelp(xv_x64_insn const *insn);
+```
 
+```h
 /* Returns nonzero if the instruction is a system call */
 int xv_x64_syscallp(xv_x64_insn const *insn);
+```
 
+```h
 /* Write a single instruction into the specified buffer, resizing backing
  * allocation structures as necessary. The buffer's "current" pointer is
  * advanced to the next free position. If errors occur, *buf will be
  * unchanged. */
 int xv_x64_write_insn(xv_x64_ibuffer    *buf,
                       xv_x64_insn const *insn);
+```
 
+```h
 /* Possible return values for xv_x64_write_insn */
 #define XV_WR_ERR  -1   /* internal error; read errno */
 #define XV_WR_CONT  0   /* no problems; can continue writing */
 #define XV_WR_END   1   /* hit end of buffer; you need to reallocate */
 #define XV_WR_EOP   2   /* invalid operands for opcode */
 #define XV_WR_INV   3   /* opcode is invalid for x86-64 */
+```
 
+```h
 /* Read a single instruction from the given const buffer, advancing the buffer
  * in the process. Writes result into *insn. If errors occur, *insn has
  * undefined state and *buf will be unchanged. */
 int xv_x64_read_insn(xv_x64_const_ibuffer *buf,
                      xv_x64_insn          *insn);
+```
 
+```h
 /* Possible return values for xv_x64_read_insn */
 #define XV_READ_ERR  -1 /* internal error; read errno */
 #define XV_READ_CONT  0 /* no problems; can read next instruction */
@@ -257,37 +325,54 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *buf,
 #define XV_READ_ENDD 10 /* hit end of stream, expecting displacement */
 #define XV_READ_ENDI 11 /* hit end of stream, expecting immediate */
 #define XV_READ_INV  12 /* opcode was invalid for x86-64 */
+```
 
+```h
 /* Rewrite a single instruction from src to dst, updating either both or
  * neither */
 int xv_x64_step_rw(xv_x64_rewriter* rw);
+```
 
+```h
 /* Possible return values for xv_x64_step_rw */
 #define XV_RW_CONT  0   /* no problems; can continue */
 #define XV_RW_R 0x100   /* error from read_insn; see low byte for code */
 #define XV_RW_W 0x200   /* error from write_insn; see low byte for code */
+```
 
-/* Operand encodings. */
-/* These are used for two purposes. First, we need them to indicate the length of */
-/* the remainder of the instruction; and second, we need to figure out how memory */
-/* is accessed and change the ModR/M and SIB bytes for %rip-relative instructions. */
+# Operand encodings
 
+These are used for two purposes. First, we need them to indicate the length of
+the remainder of the instruction; and second, we need to figure out how memory
+is accessed and change the ModR/M and SIB bytes for %rip-relative instructions.
+
+```h
 typedef uint8_t xv_x64_insn_encoding;
+```
 
+```h
 /* Bit 0: does instruction use ModR/M byte? */
 #define XV_MODRM_MASK 0x01
 #define XV_MODRM_NONE (0 << 0)  /* no ModR/M byte */
 #define XV_MODRM_MEM  (1 << 0)  /* uses ModR/M byte as memory */
+```
 
+```h
 /* Bits 1-4 (incl): what kind of immediate data follows? */
 #define XV_IMM_MASK 0x1e
+```
 
+```h
 #define XV_IMM_NONE (0 << 1)    /* no immediate data */
+```
 
+```h
 #define XV_IMM_D8   (1 << 1)    /* 8-bit %rip-relative immediate, e.g. JMP */
 #define XV_IMM_D32  (2 << 1)    /* 32-bit %rip-relative immediate */
 #define XV_IMM_DSZW (3 << 1)    /* word for 16-bit, dword for larger */
+```
 
+```h
 #define XV_IMM_I8   (4 << 1)    /* 8-bit invariant immediate, e.g. INT */
 #define XV_IMM_I16  (5 << 1)    /* 16-bit invariant immediate */
 #define XV_IMM_I32  (6 << 1)    /* 32-bit invariant immediate */
@@ -295,13 +380,19 @@ typedef uint8_t xv_x64_insn_encoding;
 #define XV_IMM_ISZW (8 << 1)    /* word for 16-bit opsize, dword for larger */
 #define XV_IMM_ISZQ (9 << 1)    /* word, dword, or qword based on 66 and 67 */
 #define XV_IMM_I2   (10 << 1)   /* imm16, imm8 (e.g. ENTER) */
+```
 
+```h
 /* Special value: invalid instruction */
 #define XV_INVALID_MASK 0x80
 #define XV_INVALID      0x80
+```
 
+```h
 xv_x64_insn_encoding const xv_x64_insn_encodings[1024];
+```
 
+```h
 #endif
 
-/* Generated by SDoc */
+```

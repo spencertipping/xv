@@ -311,7 +311,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
        ++offset,
        insn->vex   |= vex2p || vex3p,
        insn->rex_w |= rexp && !!(current & 0x08),
-       insn->r1    |= rexp &&   (current & 0x04) << 1,  /* REX.R */
+       insn->reg   |= rexp &&   (current & 0x04) << 1,  /* REX.R */
        insn->index |= rexp &&   (current & 0x02) << 2,  /* REX.X */
        insn->base  |= rexp &&   (current & 0x01) << 3,  /* REX.B */
        rexp = vex2p = vex3p = 0)
@@ -321,11 +321,11 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
         if (++offset >= buf->capacity) return XV_READ_ENDV2;
         current = buf->start[offset];
         insn->escape = XV_INSN_ESC1;                    /* implied */
-        insn->r1     = !(current & 0x80) << 3;          /* VEX.R */
+        insn->reg    = !(current & 0x80) << 3;          /* VEX.R */
       } else if (vex3p) {
         if (++offset >= buf->capacity) return XV_READ_ENDV2;
         current = buf->start[offset];
-        insn->r1     = !(current & 0x80) << 3;          /* VEX.R */
+        insn->reg    = !(current & 0x80) << 3;          /* VEX.R */
         insn->index  = !(current & 0x40) << 3;          /* VEX.X */
         insn->base   = !(current & 0x20) << 3;          /* VEX.B */
         insn->escape = current & 0x1f;                  /* VEX.m-mmmm */
@@ -335,7 +335,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
         insn->rex_w = !!(current & 0x80);               /* VEX.W */
       }
 
-      insn->r3     =   (current & 0x78) >> 3 ^ 0x0f;    /* VEX.vvvv */
+      insn->aux    =   (current & 0x78) >> 3 ^ 0x0f;    /* VEX.vvvv */
       insn->vex_l  = !!(current & 0x04);
       insn->p66   |= current == 0x01;                   /* VEX.pp */
       insn->p2     = (current & 0x03) == 2 ? XV_INSN_REPZ
@@ -368,15 +368,18 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
     xv_x64_insn_encodings[xv_x64_insn_key(insn)];
 
   /* If we use ModR/M, parse that byte and check for SIB. */
+  /* MAJOR TODO:
+   * Refactor all of this to convert to the new canoncial instruction format.
+   */
   if (enc & XV_MODRM_MASK) {
     if (++offset >= buf->capacity) return XV_READ_ENDM;
     unsigned current = buf->start[offset];
-    insn->mod   = (current & 0xc0) >> 6;
-    insn->r1   |= (current & 0x38) >> 3;
+    insn->mod  = (current & 0xc0) >> 6;
+    insn->reg |= (current & 0x38) >> 3;
 
     /* Detect special encoding for absolute-mode address */
     if (insn->mod == 0 && (current & 0x07) == XV_RBP)
-      insn->addr = XV_INSN_RIPREL;
+      insn->base = XV_NO_REG;
 
     int const displacement_bytes =
         insn->mod == 0 ? (current & 0x07) == 5 ? 4 : 0
@@ -460,16 +463,16 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
   /* Encode any REX or VEX prefix */
   if (insn->vex) {
     /* Preserve VEX */
-    xv_x64_i const vvvv_l_pp = (~insn->r3 & 0x0f) << 3
-                             | insn->vex_l        << 2
+    xv_x64_i const vvvv_l_pp = (~insn->aux & 0x0f) << 3
+                             | insn->vex_l         << 2
                              | insn->escape;
 
     if (insn->escape != XV_INSN_ESC1
         || insn->rex_w
-        || 0x08 & (insn->index | insn->base | insn->r1))
+        || 0x08 & (insn->index | insn->base | insn->reg))
       /* Need a three-byte prefix */
       stage[index++] = 0xc4,
-      stage[index++] = (1 & ~insn->r1    >> 3) << 7
+      stage[index++] = (1 & ~insn->reg   >> 3) << 7
                      | (1 & ~insn->index >> 3) << 6
                      | (1 & ~insn->base  >> 3) << 5
                      | insn->escape,
@@ -477,13 +480,13 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
     else
       /* Two-byte prefix */
       stage[index++] = 0xc5,
-      stage[index++] = (1 & ~insn->r1 >> 3) << 7 | vvvv_l_pp;
+      stage[index++] = (1 & ~insn->reg >> 3) << 7 | vvvv_l_pp;
   } else {
-    if (insn->rex_w || 0x08 & (insn->r1 | insn->index | insn->base))
+    if (insn->rex_w || 0x08 & (insn->reg | insn->index | insn->base))
       /* REX is required */
       stage[index++] = 0x40
                      | insn->rex_w            << 3
-                     | (1 & insn->r1    >> 3) << 2
+                     | (1 & insn->reg   >> 3) << 2
                      | (1 & insn->index >> 3) << 1
                      | (1 & insn->base  >> 3) << 0;
 
@@ -503,8 +506,12 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
    * figure out the x86 way to express what is logically encoded in the operand
    * data. For example, we may have a %rip-relative address, which is encoded
    * as a special case of ModR/M and SIB. */
+
+  /* MAJOR TODO:
+   * Refactor all of this to convert to the new canoncial instruction format.
+   */
   if (enc & XV_MODRM_MASK) {
-    xv_x64_i const reg = insn->r1 << 3 & 0x38;
+    xv_x64_i const reg = insn->reg << 3 & 0x38;
 
     /* Figure out what kind of ModR/M and SIB setup to use. Here are the
      * possibilities:
