@@ -116,9 +116,9 @@ int xv_x64_reallocate_ibuffer(xv_x64_ibuffer *buf,
 
 /* We can make a few representational optimizations to save some work. For */
 /* example, we don't need to reconstruct the instruction in its original form; if */
-/* the instruction was originally encoded with a redundant VEX prefix and isn't */
-/* using AVX registers, we can easily enough re-encode it with REX. So we need to */
-/* capture the intent, not necessarily the form, of the instruction. */
+/* the instruction was originally encoded with a redundant 3-byte VEX prefix, we */
+/* can sometimes re-encode it with a two-byte VEX. So we need to capture the */
+/* intent, not necessarily the form, of the instruction. */
 
 /* This is also ideal because it gives us a way to uniformly represent memory */
 /* accesses. In this sense our interface is more like an assembler than like a */
@@ -183,16 +183,21 @@ struct xv_x64_insn {
 #define XV_RDI 7
 /* r8-r15: 8-15 */
 
+/* Addressing modes */
+#define XV_ADDR_REG     0
+#define XV_ADDR_RIPREL  1
+#define XV_ADDR_ZEROREL 2
+#define XV_ADDR_BASE    3
+#define XV_ADDR_SCALE1  4
+#define XV_ADDR_SCALE2  5
+#define XV_ADDR_SCALE4  6
+#define XV_ADDR_SCALE8  7
+
 /* xv_x64_insn field values */
 #define XV_INSN_ESC0   0        /* xv_x64_insn.escape */
 #define XV_INSN_ESC1   1        /* two-byte opcode: 0x0f prefix */
 #define XV_INSN_ESC238 2        /* three-byte opcode: 0x0f 0x38 prefix */
 #define XV_INSN_ESC23A 3        /* three-byte opcode: 0x0f 0x3a prefix */
-
-#define XV_INSN_NOINDEX 0       /* xv_x64_insn.addr */
-#define XV_INSN_INDEX   1       /* use an index register */
-#define XV_INSN_RIPREL  2       /* %rip-relative addressing */
-#define XV_INSN_ABS     3       /* absolute address */
 
 #define XV_INSN_LOCK  1         /* xv_x64_insn.p1 */
 #define XV_INSN_REPNZ 2
@@ -212,9 +217,6 @@ struct xv_x64_insn {
     _insn.opcode | _insn.escape << 2; \
   })
 
-/* Returns nonzero if the instruction's memory operand is %rip-relative */
-int xv_x64_riprelp(xv_x64_insn const *insn);
-
 /* Returns nonzero if the instruction's immediate operand is a %rip-relative
  * memory displacement */
 int xv_x64_immrelp(xv_x64_insn const *insn);
@@ -228,6 +230,11 @@ int xv_x64_syscallp(xv_x64_insn const *insn);
  * unchanged. */
 int xv_x64_write_insn(xv_x64_ibuffer    *buf,
                       xv_x64_insn const *insn);
+
+/* Print human-readable instruction to the specified fd. This is useful for
+ * debugging. Note that we don't print the mnemonic for the opcode; that's too
+ * much work. We just print the operands. */
+int xv_x64_print_insn(int fd, xv_x64_insn const *insn);
 
 /* Possible return values for xv_x64_write_insn */
 #define XV_WR_ERR  -1   /* internal error; read errno */

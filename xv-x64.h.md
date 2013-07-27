@@ -142,9 +142,9 @@ addresses, fixing things up only when we know it's safe to do so.
 
 We can make a few representational optimizations to save some work. For
 example, we don't need to reconstruct the instruction in its original form; if
-the instruction was originally encoded with a redundant VEX prefix and isn't
-using AVX registers, we can easily enough re-encode it with REX. So we need to
-capture the intent, not necessarily the form, of the instruction.
+the instruction was originally encoded with a redundant 3-byte VEX prefix, we
+can sometimes re-encode it with a two-byte VEX. So we need to capture the
+intent, not necessarily the form, of the instruction.
 
 This is also ideal because it gives us a way to uniformly represent memory
 accesses. In this sense our interface is more like an assembler than like a
@@ -164,13 +164,17 @@ encoding all of these modes into a single value, insn->addr, which can be any
 of the following:
 
     XV_ADDR_REG           <- use a register as a value
-    XV_ADDR_RIPREL        <- use %rip with displacement
-    XV_ADDR_ZEROREL       <- use displacement as absolute
-    XV_ADDR_BASE          <- use base reg, optionally with displacement
-    XV_ADDR_SCALE1        <- use 1-byte scaling of index reg
-    XV_ADDR_SCALE2        <- use 2-byte scaling of index reg
-    XV_ADDR_SCALE4        <- use 4-byte scaling of index reg
-    XV_ADDR_SCALE8        <- use 8-byte scaling of index reg
+    XV_ADDR_RIPREL        <- *(%rip + displacement)
+    XV_ADDR_ZEROREL       <- *displacement
+    XV_ADDR_BASE          <- *(base + displacement)
+    XV_ADDR_SCALE1        <- *(base + 1*index + displacement)
+    XV_ADDR_SCALE2        <- *(base + 2*index + displacement)
+    XV_ADDR_SCALE4        <- *(base + 4*index + displacement)
+    XV_ADDR_SCALE8        <- *(base + 8*index + displacement)
+
+Our job, then, is to bidirectionally convert between our sane representation
+and Intel's broken one. The gory details of this are handled in
+`xv_x64_read_insn` and `xv_x64_write_insn`.
 
 ```h
 struct xv_x64_insn {
@@ -178,30 +182,26 @@ struct xv_x64_insn {
 ```
 
 ```h
-  unsigned int p1     : 2;
-  unsigned int p2     : 3;
-  unsigned int p66    : 1;
-  unsigned int p67    : 1;
-  unsigned int rex_w  : 1;
-  unsigned int vex    : 1;      /* encoded with vex? (changes semantics) */
-  unsigned int vex_l  : 1;
-  unsigned int escape : 2;      /* opcode prefix type */
+  unsigned p1     : 2;          /* group-1 instruction prefix */
+  unsigned p2     : 3;          /* group-2 instruction prefix */
+  unsigned p66    : 1;          /* 0x66 prefix? */
+  unsigned p67    : 1;          /* 0x67 prefix? */
+  unsigned rex_w  : 1;          /* presence of REX.W (can exist with VEX) */
+  unsigned vex    : 1;          /* encoded with vex? (changes semantics) */
+  unsigned vex_l  : 1;          /* presence of VEX.L (implies VEX) */
 ```
 
 ```h
-  unsigned int opcode : 8;      /* opcode byte */
+  unsigned escape : 2;          /* opcode prefix type */
+  unsigned opcode : 8;          /* opcode byte */
 ```
 
 ```h
-  unsigned int mod    : 2;      /* ModR/M high bits */
-  unsigned int scale  : 2;      /* SIB byte encoding */
-  unsigned int r1     : 5;      /* ModR/M reg field (with REX/VEX bit) */
-  unsigned int base   : 5;      /* the r/m part of ModR/M if no SIB */
-  unsigned int r3     : 5;      /* r3 is present only with VEX */
-  unsigned int index  : 5;
-```
-
-```h
+  unsigned addr   : 3;          /* addressing mode */
+  unsigned reg    : 4;          /* primary operand register (always reg) */
+  unsigned base   : 4;          /* secondary operand register or mem offset */
+  unsigned index  : 4;          /* indexing register, if used */
+  unsigned aux    : 4;          /* third register, only if VEX is used */
   int32_t displacement;         /* memory displacement, up to 32 bits */
   int64_t immediate;            /* sometimes memory offset (e.g. JMP) */
 };
@@ -217,15 +217,19 @@ struct xv_x64_insn {
 #define XV_RBP 5
 #define XV_RSI 6
 #define XV_RDI 7
-```
-
-```h
 /* r8-r15: 8-15 */
 ```
 
 ```h
-#define XV_NO_REG 0x10
-#define XV_RIP    0x11
+/* Addressing modes */
+#define XV_ADDR_REG     0
+#define XV_ADDR_RIPREL  1
+#define XV_ADDR_ZEROREL 2
+#define XV_ADDR_BASE    3
+#define XV_ADDR_SCALE1  4
+#define XV_ADDR_SCALE2  5
+#define XV_ADDR_SCALE4  6
+#define XV_ADDR_SCALE8  7
 ```
 
 ```h
@@ -234,13 +238,6 @@ struct xv_x64_insn {
 #define XV_INSN_ESC1   1        /* two-byte opcode: 0x0f prefix */
 #define XV_INSN_ESC238 2        /* three-byte opcode: 0x0f 0x38 prefix */
 #define XV_INSN_ESC23A 3        /* three-byte opcode: 0x0f 0x3a prefix */
-```
-
-```h
-#define XV_INSN_NOINDEX 0       /* xv_x64_insn.addr */
-#define XV_INSN_INDEX   1       /* use an index register */
-#define XV_INSN_RIPREL  2       /* %rip-relative addressing */
-#define XV_INSN_ABS     3       /* absolute address */
 ```
 
 ```h
@@ -268,11 +265,6 @@ struct xv_x64_insn {
 ```
 
 ```h
-/* Returns nonzero if the instruction's memory operand is %rip-relative */
-int xv_x64_riprelp(xv_x64_insn const *insn);
-```
-
-```h
 /* Returns nonzero if the instruction's immediate operand is a %rip-relative
  * memory displacement */
 int xv_x64_immrelp(xv_x64_insn const *insn);
@@ -290,6 +282,13 @@ int xv_x64_syscallp(xv_x64_insn const *insn);
  * unchanged. */
 int xv_x64_write_insn(xv_x64_ibuffer    *buf,
                       xv_x64_insn const *insn);
+```
+
+```h
+/* Print human-readable instruction to the specified fd. This is useful for
+ * debugging. Note that we don't print the mnemonic for the opcode; that's too
+ * much work. We just print the operands. */
+int xv_x64_print_insn(int fd, xv_x64_insn const *insn);
 ```
 
 ```h

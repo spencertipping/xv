@@ -412,7 +412,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
        ++offset,
        insn->vex   |= vex2p || vex3p,
        insn->rex_w |= rexp && !!(current & 0x08),
-       insn->r1    |= rexp &&   (current & 0x04) << 1,  /* REX.R */
+       insn->reg   |= rexp &&   (current & 0x04) << 1,  /* REX.R */
        insn->index |= rexp &&   (current & 0x02) << 2,  /* REX.X */
        insn->base  |= rexp &&   (current & 0x01) << 3,  /* REX.B */
        rexp = vex2p = vex3p = 0)
@@ -424,11 +424,11 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
         if (++offset >= buf->capacity) return XV_READ_ENDV2;
         current = buf->start[offset];
         insn->escape = XV_INSN_ESC1;                    /* implied */
-        insn->r1     = !(current & 0x80) << 3;          /* VEX.R */
+        insn->reg    = !(current & 0x80) << 3;          /* VEX.R */
       } else if (vex3p) {
         if (++offset >= buf->capacity) return XV_READ_ENDV2;
         current = buf->start[offset];
-        insn->r1     = !(current & 0x80) << 3;          /* VEX.R */
+        insn->reg    = !(current & 0x80) << 3;          /* VEX.R */
         insn->index  = !(current & 0x40) << 3;          /* VEX.X */
         insn->base   = !(current & 0x20) << 3;          /* VEX.B */
         insn->escape = current & 0x1f;                  /* VEX.m-mmmm */
@@ -442,7 +442,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 ```
 
 ```c
-      insn->r3     =   (current & 0x78) >> 3 ^ 0x0f;    /* VEX.vvvv */
+      insn->aux    =   (current & 0x78) >> 3 ^ 0x0f;    /* VEX.vvvv */
       insn->vex_l  = !!(current & 0x04);
       insn->p66   |= current == 0x01;                   /* VEX.pp */
       insn->p2     = (current & 0x03) == 2 ? XV_INSN_REPZ
@@ -484,42 +484,53 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 ```
 
 ```c
-  /* If we use ModR/M, parse that byte and check for SIB. */
+  /* If we use ModR/M, parse that byte and check for SIB. Then parse through
+   * the special cases to decode intent. */
   if (enc & XV_MODRM_MASK) {
     if (++offset >= buf->capacity) return XV_READ_ENDM;
     unsigned current = buf->start[offset];
-    insn->mod  = (current & 0xc0) >> 6;
-    insn->r1  |= (current & 0x38) >> 3;
+    unsigned mod     = (current & 0xc0) >> 6;
+    unsigned reg     = insn->reg  | (current & 0x38) >> 3;
+    unsigned base    = insn->base |  current & 0x07;
 ```
 
 ```c
-    /* Detect special encoding for absolute-mode address */
-    if (insn->mod == 0 && (current & 0x07) == XV_RBP)
-      insn->base = XV_NO_REG;
+    unsigned use_sib = 0;
+    unsigned scale, index;
 ```
 
 ```c
-    int const displacement_bytes =
-        insn->mod == 0 ? (current & 0x07) == 5 ? 4 : 0
-      : insn->mod == 1 ? 1
-      : insn->mod == 2 ? 4 : 0;
-```
-
-```c
-    if (insn->mod != 3 && (current & 0x07) == XV_RSP) {
+    if (use_sib = mod != 3 && (current & 0x07) == XV_RSP) {
       if (++offset >= buf->capacity) return XV_READ_ENDS;
       current = buf->start[offset];
-      insn->scale  = (current & 0xc0) >> 6;
-      insn->index |= (current & 0x38) >> 3;
-```
-
-```c
-      /* TODO: detect special cases */
+      scale   =               (current & 0xc0) >> 6;
+      index   = insn->index | (current & 0x38) >> 3;
     }
 ```
 
 ```c
-    insn->base |= current & 0x07;
+    int const displacement_bytes =
+        mod == 0 ? (reg & 0x07) == XV_RBP
+                 || use_sib && base == XV_RBP ? 4 : 0
+      : mod == 1 ? 1
+      : mod == 2 ? 4 : 0;
+```
+
+```c
+    /* Now parse out the intent through Intel's minefield of special cases. */
+    insn->addr = mod == 3                   ? XV_ADDR_REG
+               : !mod && reg == XV_RBP      ? XV_ADDR_RIPREL
+               : !mod && use_sib
+                      && base == XV_RBP
+                      && index == XV_RSP    ? XV_ADDR_ZEROREL
+               : use_sib && index == XV_RSP ? XV_ADDR_BASE
+               :                              XV_ADDR_SCALE1 | scale;
+```
+
+```c
+    insn->reg   = reg;          /* always defined */
+    insn->base  = base;         /* always defined */
+    insn->index = index;        /* undefined if no SIB byte */
 ```
 
 ```c
@@ -610,18 +621,18 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
   /* Encode any REX or VEX prefix */
   if (insn->vex) {
     /* Preserve VEX */
-    xv_x64_i const vvvv_l_pp = (~insn->r3 & 0x0f) << 3
-                             | insn->vex_l        << 2
+    xv_x64_i const vvvv_l_pp = (~insn->aux & 0x0f) << 3
+                             | insn->vex_l         << 2
                              | insn->escape;
 ```
 
 ```c
     if (insn->escape != XV_INSN_ESC1
         || insn->rex_w
-        || 0x08 & (insn->index | insn->base | insn->r1))
+        || 0x08 & (insn->index | insn->base | insn->reg))
       /* Need a three-byte prefix */
       stage[index++] = 0xc4,
-      stage[index++] = (1 & ~insn->r1    >> 3) << 7
+      stage[index++] = (1 & ~insn->reg   >> 3) << 7
                      | (1 & ~insn->index >> 3) << 6
                      | (1 & ~insn->base  >> 3) << 5
                      | insn->escape,
@@ -629,13 +640,13 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
     else
       /* Two-byte prefix */
       stage[index++] = 0xc5,
-      stage[index++] = (1 & ~insn->r1 >> 3) << 7 | vvvv_l_pp;
+      stage[index++] = (1 & ~insn->reg >> 3) << 7 | vvvv_l_pp;
   } else {
-    if (insn->rex_w || 0x08 & (insn->r1 | insn->index | insn->base))
+    if (insn->rex_w || 0x08 & (insn->reg | insn->index | insn->base))
       /* REX is required */
       stage[index++] = 0x40
                      | insn->rex_w            << 3
-                     | (1 & insn->r1    >> 3) << 2
+                     | (1 & insn->reg   >> 3) << 2
                      | (1 & insn->index >> 3) << 1
                      | (1 & insn->base  >> 3) << 0;
 ```
@@ -660,69 +671,22 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
   /* Now encode operands. This is a matter of a few things. First, we need to
    * figure out the x86 way to express what is logically encoded in the operand
    * data. For example, we may have a %rip-relative address, which is encoded
-   * as a special case of ModR/M and SIB. */
+   * as a special case of ModR/M and SIB. Then we need to figure out how many
+   * bytes are required to store the displacement. This impacts the ModR/M and
+   * SIB values. */
   if (enc & XV_MODRM_MASK) {
-    xv_x64_i const reg = insn->r1 << 3 & 0x38;
+    int const displacement_bytes = !insn->displacement                 ? 0
+                                 : xv_overflowp(insn->displacement, 8) ? 4
+                                 :                                       1;
 ```
 
 ```c
-    /* Figure out what kind of ModR/M and SIB setup to use. Here are the
-     * possibilities:
-     *
-     * 1. Absolute addressing: use SIB with index = %rsp.
-     * 2. Instruction is %rip-relative: mod = 0, r/m = %rbp.
-     * 3. %rsp or %r12 is base: use SIB with scale = 0.
-     * 4. %rbp or %r13 is base: force displacement encoding.
-     *
-     * Otherwise, we can encode the instruction as specified. */
-```
-
-```c
-    unsigned displacement_bytes = 0;
-    switch (insn->addr) {
-      case XV_INSN_RIPREL:
-        stage[index++] = XV_RBP | reg;
-        displacement_bytes = 4;
-        break;
-```
-
-```c
-      case XV_INSN_ABS:
-        displacement_bytes = xv_overflowp(insn->displacement, 1) ? 4 : 1;
-        stage[index++] = (displacement_bytes == 4 ? 0x80 : 0x40)
-                       | reg
-                       | XV_RSP;
-        stage[index++] = insn->scale << 6
-                       | insn->index << 3 & 0x38
-                       | insn->base       & 0x07;
-        break;
-```
-
-```c
-      default:
-        /* No known-wonky cases yet, but some that still require escaping.
-         * Check for those: */
-        if (insn->base & 0x07 == XV_RSP) {
-          /* TODO */
-        }
-    }
-```
-
-```c
-    if (xv_overflowp(insn->displacement, displacement_bytes * 8))
-      return XV_WR_EOP;
-```
-
-```c
-    --displacement_bytes;
-    for (int i = 0; i <= displacement_bytes; ++i)
-      stage[index++] =
-        insn->displacement >> (displacement_bytes - i << 3) & 0xff;
+    /* TODO */
   }
 ```
 
 ```c
-  return XV_WR_ERR;
+  return XV_WR_CONT;
 }
 ```
 
@@ -730,12 +694,6 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
 
 This is where the fun stuff happens. This function steps a rewriter forward by
 one instruction, returning a status code to indicate what should happen next.
-
-```c
-inline int xv_x64_riprelp(xv_x64_insn const *const insn) {
-  return insn->mod == 0 && insn->base == XV_RSP;
-}
-```
 
 ```c
 inline int xv_x64_immrelp(xv_x64_insn const *const insn) {

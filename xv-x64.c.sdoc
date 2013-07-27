@@ -367,35 +367,43 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
   xv_x64_insn_encoding const enc =
     xv_x64_insn_encodings[xv_x64_insn_key(insn)];
 
-  /* If we use ModR/M, parse that byte and check for SIB. */
-  /* MAJOR TODO:
-   * Refactor all of this to convert to the new canoncial instruction format.
-   */
+  /* If we use ModR/M, parse that byte and check for SIB. Then parse through
+   * the special cases to decode intent. */
   if (enc & XV_MODRM_MASK) {
     if (++offset >= buf->capacity) return XV_READ_ENDM;
     unsigned current = buf->start[offset];
-    insn->mod  = (current & 0xc0) >> 6;
-    insn->reg |= (current & 0x38) >> 3;
+    unsigned mod     = (current & 0xc0) >> 6;
+    unsigned reg     = insn->reg  | (current & 0x38) >> 3;
+    unsigned base    = insn->base |  current & 0x07;
 
-    /* Detect special encoding for absolute-mode address */
-    if (insn->mod == 0 && (current & 0x07) == XV_RBP)
-      insn->base = XV_NO_REG;
+    unsigned use_sib = 0;
+    unsigned scale, index;
 
-    int const displacement_bytes =
-        insn->mod == 0 ? (current & 0x07) == 5 ? 4 : 0
-      : insn->mod == 1 ? 1
-      : insn->mod == 2 ? 4 : 0;
-
-    if (insn->mod != 3 && (current & 0x07) == XV_RSP) {
+    if (use_sib = mod != 3 && (current & 0x07) == XV_RSP) {
       if (++offset >= buf->capacity) return XV_READ_ENDS;
       current = buf->start[offset];
-      insn->scale  = (current & 0xc0) >> 6;
-      insn->index |= (current & 0x38) >> 3;
-
-      /* TODO: detect special cases */
+      scale   =               (current & 0xc0) >> 6;
+      index   = insn->index | (current & 0x38) >> 3;
     }
 
-    insn->base |= current & 0x07;
+    int const displacement_bytes =
+        mod == 0 ? (reg & 0x07) == XV_RBP
+                 || use_sib && base == XV_RBP ? 4 : 0
+      : mod == 1 ? 1
+      : mod == 2 ? 4 : 0;
+
+    /* Now parse out the intent through Intel's minefield of special cases. */
+    insn->addr = mod == 3                   ? XV_ADDR_REG
+               : !mod && reg == XV_RBP      ? XV_ADDR_RIPREL
+               : !mod && use_sib
+                      && base == XV_RBP
+                      && index == XV_RSP    ? XV_ADDR_ZEROREL
+               : use_sib && index == XV_RSP ? XV_ADDR_BASE
+               :                              XV_ADDR_SCALE1 | scale;
+
+    insn->reg   = reg;          /* always defined */
+    insn->base  = base;         /* always defined */
+    insn->index = index;        /* undefined if no SIB byte */
 
     /* Now read little-endian displacement. */
     if ((offset += displacement_bytes) >= buf->capacity) return XV_READ_ENDD;
@@ -505,68 +513,23 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
   /* Now encode operands. This is a matter of a few things. First, we need to
    * figure out the x86 way to express what is logically encoded in the operand
    * data. For example, we may have a %rip-relative address, which is encoded
-   * as a special case of ModR/M and SIB. */
-
-  /* MAJOR TODO:
-   * Refactor all of this to convert to the new canoncial instruction format.
-   */
+   * as a special case of ModR/M and SIB. Then we need to figure out how many
+   * bytes are required to store the displacement. This impacts the ModR/M and
+   * SIB values. */
   if (enc & XV_MODRM_MASK) {
-    xv_x64_i const reg = insn->reg << 3 & 0x38;
+    int const displacement_bytes = !insn->displacement                 ? 0
+                                 : xv_overflowp(insn->displacement, 8) ? 4
+                                 :                                       1;
 
-    /* Figure out what kind of ModR/M and SIB setup to use. Here are the
-     * possibilities:
-     *
-     * 1. Absolute addressing: use SIB with index = %rsp.
-     * 2. Instruction is %rip-relative: mod = 0, r/m = %rbp.
-     * 3. %rsp or %r12 is base: use SIB with scale = 0.
-     * 4. %rbp or %r13 is base: force displacement encoding.
-     *
-     * Otherwise, we can encode the instruction as specified. */
-
-    unsigned displacement_bytes = 0;
-    switch (insn->addr) {
-      case XV_INSN_RIPREL:
-        stage[index++] = XV_RBP | reg;
-        displacement_bytes = 4;
-        break;
-
-      case XV_INSN_ABS:
-        displacement_bytes = xv_overflowp(insn->displacement, 1) ? 4 : 1;
-        stage[index++] = (displacement_bytes == 4 ? 0x80 : 0x40)
-                       | reg
-                       | XV_RSP;
-        stage[index++] = insn->scale << 6
-                       | insn->index << 3 & 0x38
-                       | insn->base       & 0x07;
-        break;
-
-      default:
-        /* No known-wonky cases yet, but some that still require escaping.
-         * Check for those: */
-        if (insn->base & 0x07 == XV_RSP) {
-          /* TODO */
-        }
-    }
-
-    if (xv_overflowp(insn->displacement, displacement_bytes * 8))
-      return XV_WR_EOP;
-
-    --displacement_bytes;
-    for (int i = 0; i <= displacement_bytes; ++i)
-      stage[index++] =
-        insn->displacement >> (displacement_bytes - i << 3) & 0xff;
+    /* TODO */
   }
 
-  return XV_WR_ERR;
+  return XV_WR_CONT;
 }
 
 Instruction rewriter.
 This is where the fun stuff happens. This function steps a rewriter forward by
 one instruction, returning a status code to indicate what should happen next.
-
-inline int xv_x64_riprelp(xv_x64_insn const *const insn) {
-  return insn->mod == 0 && insn->base == XV_RSP;
-}
 
 inline int xv_x64_immrelp(xv_x64_insn const *const insn) {
   xv_x64_insn_encoding const enc = xv_x64_insn_encodings[xv_x64_insn_key(insn)];
