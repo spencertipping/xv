@@ -24,8 +24,6 @@ forward_struct(xv_x64_ibuffer)
 forward_struct(xv_x64_const_ibuffer)
 forward_struct(xv_x64_rewriter)
 forward_struct(xv_x64_insn)
-forward_struct(xv_x64_bblock)
-forward_struct(xv_x64_bblock_list)
 
 #undef forward_struct
 
@@ -184,6 +182,8 @@ struct xv_x64_insn {
 /* r8-r15: 8-15 */
 
 /* Addressing modes */
+#define XV_ADDR_SCALE_MASK 0x04
+
 #define XV_ADDR_REG     0
 #define XV_ADDR_RIPREL  1
 #define XV_ADDR_ZEROREL 2

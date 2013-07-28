@@ -481,7 +481,8 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
       /* Need a three-byte prefix */
       stage[index++] = 0xc4,
       stage[index++] = (1 & ~insn->reg   >> 3) << 7
-                     | (1 & ~insn->index >> 3) << 6
+                     | (insn->addr & XV_ADDR_SCALE_MASK &&
+                        1 & ~insn->index >> 3) << 6
                      | (1 & ~insn->base  >> 3) << 5
                      | insn->escape,
       stage[index++] = insn->rex_w << 7 | vvvv_l_pp;
@@ -495,7 +496,8 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
       stage[index++] = 0x40
                      | insn->rex_w            << 3
                      | (1 & insn->reg   >> 3) << 2
-                     | (1 & insn->index >> 3) << 1
+                     | (insn->addr & XV_ADDR_SCALE_MASK &&
+                        1 & insn->index >> 3) << 1
                      | (1 & insn->base  >> 3) << 0;
 
     /* Opcode escaping: VEX captures this information inside the prefix, but
