@@ -357,6 +357,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 
 ```c
   memset(insn, 0, sizeof(xv_x64_insn));
+  insn->start = buf->current - buf->start + buf->logical_start;
 ```
 
 ```c
@@ -369,8 +370,10 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 
 ```c
        offset < buf->capacity
-         && ((g1p = XV_G1P(current)) || (g2p = XV_G2P(current)) ||
-             (g3p = XV_G3P(current)) || (g4p = XV_G4P(current)));
+         && ((g1p = XV_G1P(current = buf->start[offset]))
+            || (g2p = XV_G2P(current))
+            || (g3p = XV_G3P(current))
+            || (g4p = XV_G4P(current)));
 ```
 
 ```c
@@ -633,7 +636,8 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
       /* Need a three-byte prefix */
       stage[index++] = 0xc4,
       stage[index++] = (1 & ~insn->reg   >> 3) << 7
-                     | (1 & ~insn->index >> 3) << 6
+                     | (insn->addr & XV_ADDR_SCALE_BIT &&
+                        1 & ~insn->index >> 3) << 6
                      | (1 & ~insn->base  >> 3) << 5
                      | insn->escape,
       stage[index++] = insn->rex_w << 7 | vvvv_l_pp;
@@ -647,7 +651,8 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
       stage[index++] = 0x40
                      | insn->rex_w            << 3
                      | (1 & insn->reg   >> 3) << 2
-                     | (1 & insn->index >> 3) << 1
+                     | (insn->addr & XV_ADDR_SCALE_BIT &&
+                        1 & insn->index >> 3) << 1
                      | (1 & insn->base  >> 3) << 0;
 ```
 
@@ -675,18 +680,216 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
    * bytes are required to store the displacement. This impacts the ModR/M and
    * SIB values. */
   if (enc & XV_MODRM_MASK) {
-    int const displacement_bytes = !insn->displacement                 ? 0
-                                 : xv_overflowp(insn->displacement, 8) ? 4
-                                 :                                       1;
+    int const displacement_min_bytes = !insn->displacement                 ? 0
+                                     : xv_overflowp(insn->displacement, 8) ? 4
+                                     :                                       1;
 ```
 
 ```c
-    /* TODO */
+    /* In certain cases, x86 machine code won't be able to encode the
+     * displacement as such. So we may need to increase the size if, for
+     * instance, we're RIP-relative or zero-relative. */
+    int const sib_escaped        = (insn->base & 0x07) == XV_RBP;
+    int const displacement_bytes =
+        insn->addr == XV_ADDR_RIPREL
+        || insn->addr == XV_ADDR_ZEROREL ? 4
+      : insn->addr == XV_ADDR_REG        ? 0
+      : sib_escaped                      ? displacement_min_bytes > 1
+                                           ? displacement_min_bytes : 1
+      :                                    displacement_min_bytes;
+```
+
+```c
+    int const sib_required = sib_escaped
+                          || insn->addr & XV_ADDR_SCALE_BIT
+                          || insn->addr == XV_ADDR_ZEROREL;
+```
+
+```c
+    if (sib_required) {
+      /* TODO */
+    }
   }
 ```
 
 ```c
   return XV_WR_CONT;
+}
+```
+
+# Instruction printing logic
+
+This is just for debugging. The goal here is to show things like which memory
+was being accessed by an instruction; if our rewriter changes it, then we've
+done something wrong. Our printer is less complete than an assembler in that we
+don't recognize different types of registers (`%al` vs `%ah`, `%eax` vs `%rax`,
+and `%xmm`, for example), and we don't provide instruction mnemonics. This
+means you still have to know some machine code, but you won't have to decode
+the ModR/M and SIB stuff by hand (or figure out which REX and VEX bits should
+extend the register arguments).
+
+```c
+/* If chars is negative, interpret the number as a signed quantity. */
+static inline int print_hex(char    *const buf,
+                            int64_t        x,
+                            signed         chars) {
+  unsigned offset = 0;
+  if (chars < 0) {
+    chars = -chars;
+    if (x < 0) {
+      buf[0] = '-';
+      offset = 1;
+      x      = -x;
+    }
+  }
+```
+
+```c
+  for (int i = chars - 1; i >= 0; --i)
+    buf[i + offset] = "0123456789abcdef"[x >> (chars - 1 - i) * 4 & 0xf];
+  return chars + offset;
+}
+```
+
+```c
+static inline int print_str(char       *const buf,
+                            char const *const str) {
+  ssize_t const size = strlen(str);
+  strncpy(buf, str, size);
+  return size;
+}
+```
+
+```c
+static char const *escape_names[]   = { "", "0f", "0f38", "0f3a" };
+static char const *register_names[] =
+  { "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi",
+    "r8",  "r9",  "r10", "r11", "r12", "r13", "r14", "r15" };
+```
+
+```c
+static char const *p1_names[] = { "", "lock ", "repnz ", "repz " };
+static char const *p2_names[] =
+  { "", "cs[bnt] ", "ss ", "ds[bt] ", "es ", "fs ", "gs ", "P2INV " };
+```
+
+```c
+int xv_x64_print_insn(char              *const buf,
+                      unsigned           const size,
+                      xv_x64_insn const *const insn) {
+  char stage[128] = { 0 };
+  unsigned index  = 0;
+```
+
+```c
+#define back(n)       index -= (n)
+#define str(s)        index += print_str(stage + index, (s))
+#define hex(x, chars) index += print_hex(stage + index, (x), (chars))
+```
+
+```c
+  hex(insn->start, 16);
+  str("(");
+  hex(insn->rip - insn->start, 1);
+  str(")");
+  str(": ");
+```
+
+```c
+  str(p1_names[insn->p1]);
+  str(p2_names[insn->p2]);
+  if (insn->p66) str("66 ");
+  if (insn->p67) str("67 ");
+```
+
+```c
+  if (insn->vex) {
+    str("vex. ");
+    if (insn->vex_l) back(1), str("l ");
+    if (insn->rex_w) back(1), str("w ");
+  } else if (insn->rex_w)
+    str("rex.w ");
+```
+
+```c
+  str(escape_names[insn->escape]);
+  hex(insn->opcode, 2);
+  str(" ");
+```
+
+```c
+  unsigned const enc = xv_x64_insn_encodings[xv_x64_insn_key(insn)];
+  if (enc & XV_MODRM_MASK) {
+    str("%");
+    str(register_names[insn->reg]);
+    str(" ");
+```
+
+```c
+    switch (insn->addr) {
+      case XV_ADDR_REG:
+        str("%"), str(register_names[insn->base]);
+        break;
+```
+
+```c
+      case XV_ADDR_RIPREL:
+        hex(insn->displacement, -8), str("(%rip) [= "),
+        hex(insn->rip + insn->displacement, 16), str("]");
+        break;
+```
+
+```c
+      case XV_ADDR_ZEROREL:
+        hex(insn->displacement, -8), str("(0)");
+        break;
+```
+
+```c
+      case XV_ADDR_BASE:
+        hex(insn->displacement, -8), str("(%"),
+        str(register_names[insn->base]), str(")");
+        break;
+```
+
+```c
+      default:
+        hex(insn->displacement, -8), str("(%"),
+        str(register_names[insn->base]), str(", %"),
+        str(register_names[insn->index]), str(", "),
+        hex(1 << (insn->addr & XV_ADDR_SCALE_MASK), 1), str(")");
+        break;
+    }
+```
+
+```c
+    str(" ");
+    if (insn->vex) str("%"), str(register_names[insn->aux]), str(" ");
+  }
+```
+
+```c
+  if (enc & XV_IMM_INVARIANT_MASK) hex(insn->immediate, -16);
+  else if (enc & XV_IMM_MASK)      hex(insn->immediate, -16),
+                                     str("[= "),
+                                     hex(insn->rip + insn->immediate, 16),
+                                     str("]");
+```
+
+```c
+#undef back
+#undef str
+#undef hex
+```
+
+```c
+  stage[index++] = '\0';
+```
+
+```c
+  if (index > size) return 0;
+  strncpy(buf, stage, index);
+  return index;
 }
 ```
 

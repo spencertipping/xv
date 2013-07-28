@@ -26,24 +26,21 @@ int main(int const argc, char const *const *const argv) {
   printf("initialized buffer; printing bytes...\n");
   for (int i = 0;
        i < buf.capacity;
-       ++i & 0x0f || printf("\n"))
+       i & 0x0f || printf("\n%04x: ", i), ++i)
     printf("%02x ", buf.start[i]);
 
   printf("\n");
 
   xv_x64_insn insn;
-  int status;
+  int         status;
+  char        buffer[128];
   while (!(status = xv_x64_read_insn(&buf, &insn)))
-    printf("rip: %04lx, opcode: %02lx, escape: %ld\n",
-           (uint64_t) insn.rip,
-           (uint64_t) insn.opcode,
-           (uint64_t) insn.escape);
+    if (xv_x64_print_insn(buffer, sizeof(buffer), &insn))
+      printf("%s\n", buffer);
 
   printf("after loop\n");
-  printf("rip: %04lx, opcode: %02lx, escape: %ld\n",
-         (uint64_t) insn.rip,
-         (uint64_t) insn.opcode,
-         (uint64_t) insn.escape);
+  if (xv_x64_print_insn(buffer, sizeof(buffer), &insn))
+    printf("%s\n", buffer);
 
   printf("last status code: %d\n", status);
 

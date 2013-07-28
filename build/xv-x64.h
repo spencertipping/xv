@@ -24,8 +24,6 @@ forward_struct(xv_x64_ibuffer)
 forward_struct(xv_x64_const_ibuffer)
 forward_struct(xv_x64_rewriter)
 forward_struct(xv_x64_insn)
-forward_struct(xv_x64_bblock)
-forward_struct(xv_x64_bblock_list)
 
 #undef forward_struct
 
@@ -150,6 +148,7 @@ int xv_x64_reallocate_ibuffer(xv_x64_ibuffer *buf,
 /* `xv_x64_read_insn` and `xv_x64_write_insn`. */
 
 struct xv_x64_insn {
+  void const *start;            /* location of original instruction */
   void const *rip;              /* %rip of original instruction */
 
   unsigned p1     : 2;          /* group-1 instruction prefix */
@@ -184,6 +183,9 @@ struct xv_x64_insn {
 /* r8-r15: 8-15 */
 
 /* Addressing modes */
+#define XV_ADDR_SCALE_MASK 0x03
+#define XV_ADDR_SCALE_BIT  0x04
+
 #define XV_ADDR_REG     0
 #define XV_ADDR_RIPREL  1
 #define XV_ADDR_ZEROREL 2
@@ -231,10 +233,13 @@ int xv_x64_syscallp(xv_x64_insn const *insn);
 int xv_x64_write_insn(xv_x64_ibuffer    *buf,
                       xv_x64_insn const *insn);
 
-/* Print human-readable instruction to the specified fd. This is useful for
- * debugging. Note that we don't print the mnemonic for the opcode; that's too
- * much work. We just print the operands. */
-int xv_x64_print_insn(int fd, xv_x64_insn const *insn);
+/* Print human-readable representation of the instruction to the given buffer.
+ * Note that we don't encode the mnemonic of the opcode; we mainly just decode
+ * the prefixes and operands. Returns the number of characters written to the
+ * buffer, which, if nonzero, is <= size. */
+int xv_x64_print_insn(char              *buf,
+                      unsigned           size,
+                      xv_x64_insn const *insn);
 
 /* Possible return values for xv_x64_write_insn */
 #define XV_WR_ERR  -1   /* internal error; read errno */
@@ -287,7 +292,8 @@ typedef uint8_t xv_x64_insn_encoding;
 #define XV_MODRM_MEM  (1 << 0)  /* uses ModR/M byte as memory */
 
 /* Bits 1-4 (incl): what kind of immediate data follows? */
-#define XV_IMM_MASK 0x1e
+#define XV_IMM_MASK           0x1e
+#define XV_IMM_INVARIANT_MASK 0x18
 
 #define XV_IMM_NONE (0 << 1)    /* no immediate data */
 
