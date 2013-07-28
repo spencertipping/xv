@@ -48,7 +48,10 @@ xv_x64_insn_encoding const xv_x64_insn_encodings[1024] = {
 ```
 
 ```c
-  /* 0x60 - 0x6f */ R8(XV_INVALID),                     /* invalid, prefixes */
+  /* 0x60 - 0x6f */ R2(XV_INVALID),                     /* invalid */
+                    XV_INVALID,                         /* invalid */
+                    XV_MODRM_MEM  | XV_IMM_NONE,        /* movsxd */
+                    R4(XV_INVALID),                     /* prefixes */
                     XV_MODRM_NONE | XV_IMM_ISZW,        /* push imm */
                     XV_MODRM_MEM  | XV_IMM_ISZW,        /* three-arg imul */
                     XV_MODRM_NONE | XV_IMM_I8,          /* push imm8 */
@@ -782,9 +785,9 @@ int xv_x64_print_insn(char              *const buf,
 ```
 
 ```c
-#define back(n)       index -= (n)
-#define str(s)        index += print_str(stage + index, (s))
-#define hex(x, chars) index += print_hex(stage + index, (x), (chars))
+#define back(n)       (index -= (n))
+#define str(s)        (index += print_str(stage + index, (s)))
+#define hex(x, chars) (index += print_hex(stage + index, (x), (chars)))
 ```
 
 ```c
