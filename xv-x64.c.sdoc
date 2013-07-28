@@ -455,7 +455,7 @@ static inline int xv_overflowp(int64_t  const x,
 
 int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
                       xv_x64_insn const *const insn) {
-  xv_x64_i                   stage[15] = { 0 };
+  xv_x64_i                   stage[16] = { 0 };
   unsigned                   index     = 0;
   xv_x64_insn_encoding const enc       =
     xv_x64_insn_encodings[xv_x64_insn_key(insn)];
@@ -525,31 +525,69 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
    * bytes are required to store the displacement. This impacts the ModR/M and
    * SIB values. */
   if (enc & XV_MODRM_MASK) {
-    int const displacement_min_bytes = !insn->displacement                 ? 0
-                                     : xv_overflowp(insn->displacement, 8) ? 4
-                                     :                                       1;
+    if (insn->addr == XV_ADDR_REG) {
+      /* Easy case: just encode the register with mod = 3. */
+      if (insn->displacement) return XV_WR_EDISP;
+      stage[index++] = 0xc0 | insn->reg << 3 & 0x38
+                            | insn->base     & 0x07;
+    } else {
+      int const displacement_min_bytes =
+          !insn->displacement                 ? 0
+        : xv_overflowp(insn->displacement, 8) ? 4
+        :                                       1;
 
-    /* In certain cases, x86 machine code won't be able to encode the
-     * displacement as such. So we may need to increase the size if, for
-     * instance, we're RIP-relative or zero-relative. */
-    int const sib_escaped        = (insn->base & 0x07) == XV_RBP;
-    int const displacement_bytes =
-        insn->addr == XV_ADDR_RIPREL
-        || insn->addr == XV_ADDR_ZEROREL ? 4
-      : insn->addr == XV_ADDR_REG        ? 0
-      : sib_escaped                      ? displacement_min_bytes > 1
-                                           ? displacement_min_bytes : 1
-      :                                    displacement_min_bytes;
+      /* In certain cases, x86 machine code won't be able to encode the
+       * displacement as such. So we may need to increase the size if, for
+       * instance, we're RIP-relative or zero-relative. */
+      int const sib_escaped        = (insn->base & 0x07) == XV_RBP;
+      int const displacement_bytes =
+          insn->addr == XV_ADDR_RIPREL
+          || insn->addr == XV_ADDR_ZEROREL ? 4
+        : insn->addr == XV_ADDR_REG        ? 0
+        : sib_escaped                      ? displacement_min_bytes > 1
+                                             ? displacement_min_bytes : 1
+        :                                    displacement_min_bytes;
 
-    int const sib_required = sib_escaped
-                          || insn->addr & XV_ADDR_SCALE_BIT
-                          || insn->addr == XV_ADDR_ZEROREL;
+      int const sib_required = sib_escaped
+                            || insn->addr & XV_ADDR_SCALE_BIT
+                            || insn->addr == XV_ADDR_ZEROREL;
 
-    if (sib_required) {
-      /* TODO */
+      xv_x64_i const mod = displacement_bytes == 0 ? 0
+                         : displacement_bytes == 1 ? 0x40
+                         :                           0x80;
+
+      if (sib_required) {
+        /* ModR/M needs to encode SIB, the register, and the appropriate number
+         * of displacement bits. */
+        stage[index++] = mod | insn->reg << 3 & 0x38 | XV_RSP;
+
+        /* Now encode SIB byte, including all wonky cases. */
+        stage[index++] =
+            insn->addr == XV_ADDR_ZEROREL ? XV_RSP << 3 | XV_RBP
+          : insn->addr == XV_ADDR_BASE    ? XV_RSP << 3 | insn->base
+          : /* normal SIB */ (insn->addr & XV_ADDR_SCALE_MASK) << 6
+                             | insn->index << 3 & 0x38
+                             | insn->base       & 0x07;
+      } else {
+        /* Encode ModR/M byte normally, considering the amount of displacement
+         * to use. */
+        stage[index++] = mod | insn->reg << 3 & 0x38
+                             | insn->index    & 0x07;
+      }
+
+      for (int i = 0; i < displacement_bytes; ++i)
+        stage[index++] = insn->displacement >> i * 8 & 0xff;
     }
   }
 
+  int const immediate_bytes = xv_x64_immediate_bytes(insn);
+  if (!immediate_bytes && insn->immediate) return XV_WR_EIMM;
+  for (int i = 0; i < immediate_bytes; ++i)
+    stage[index++] = insn->immediate >> i * 8 & 0xff;
+
+  if (buf->current + index >= buf->start + buf->capacity) return XV_WR_END;
+  strncpy(buf->current, stage, index);
+  buf->current += index;
   return XV_WR_CONT;
 }
 
@@ -706,5 +744,5 @@ inline int xv_x64_syscallp(xv_x64_insn const *const insn) {
 
 int xv_x64_step_rw(xv_x64_rewriter *const shared_rw) {
   /* TODO */
-  return XV_RW_R;
+  return XV_RW_W;
 }

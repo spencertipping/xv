@@ -246,7 +246,9 @@ int xv_x64_print_insn(char              *buf,
 #define XV_WR_CONT  0   /* no problems; can continue writing */
 #define XV_WR_END   1   /* hit end of buffer; you need to reallocate */
 #define XV_WR_EOP   2   /* invalid operands for opcode */
-#define XV_WR_INV   3   /* opcode is invalid for x86-64 */
+#define XV_WR_EDISP 3   /* cannot use displacement as requested */
+#define XV_WR_EIMM  4   /* cannot use immediate as requested */
+#define XV_WR_INV   5   /* opcode is invalid for x86-64 */
 
 /* Read a single instruction from the given const buffer, advancing the buffer
  * in the process. Writes result into *insn. If errors occur, *insn has
