@@ -269,8 +269,18 @@ struct xv_x64_insn {
 ```
 
 ```h
-/* Returns nonzero if the instruction's immediate operand is a %rip-relative
- * memory displacement */
+/* Evaluates to nonzero if the instruction uses a segment-register prefix (i.e.
+ * a p2 that isn't related to branch-prediction) */
+#define xv_x64_segp(insn_ptr) \
+  ({ \
+    xv_x64_insn const _insn = *(insn_ptr); \
+    _insn.p2 && _insn.p2 != XV_INSN_CS && _insn.p2 != XV_INSN_DS; \
+  })
+```
+
+```h
+/* Evaluates to nonzero if the instruction's immediate operand is a
+ * %rip-relative memory displacement */
 int xv_x64_immrelp(xv_x64_insn const *insn);
 ```
 
@@ -307,6 +317,7 @@ int xv_x64_print_insn(char              *buf,
 #define XV_WR_EDISP 3   /* cannot use displacement as requested */
 #define XV_WR_EIMM  4   /* cannot use immediate as requested */
 #define XV_WR_INV   5   /* opcode is invalid for x86-64 */
+#define XV_WR_EIND  6   /* %rsp was used as index register (disallowed) */
 ```
 
 ```h

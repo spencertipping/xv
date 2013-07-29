@@ -280,7 +280,8 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
    * first. We're done looking if we hit the end of the input stream, or if we
    * see anything that isn't a prefix. */
   if (offset >= buf->capacity) return XV_READ_END;
-  for (unsigned g1p, g2p, g3p, g4p, current = buf->start[offset];
+  for (unsigned g1p = 0, g2p = 0, g3p = 0, g4p = 0,
+                current = buf->start[offset];
 
        offset < buf->capacity
          && ((g1p = XV_G1P(current = buf->start[offset]))
@@ -302,7 +303,8 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
                                                      : XV_INSN_GS
                                    : insn->p2,
        insn->p66 |= g3p,
-       insn->p67 |= g4p);
+       insn->p67 |= g4p,
+       g1p = 0, g2p = 0, g3p = 0, g4p = 0);
 
   /* Now look for REX and VEX prefixes. If there are multiple (technically
    * disallowed), we will get wonky results. */
@@ -384,7 +386,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
     unsigned base    = insn->base |  current & 0x07;
 
     unsigned use_sib = 0;
-    unsigned scale, index;
+    unsigned scale   = 0, index = 0;
 
     if (use_sib = mod != 3 && (current & 0x07) == XV_RSP) {
       if (++offset >= buf->capacity) return XV_READ_ENDS;
@@ -395,22 +397,25 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 
     int const displacement_bytes =
         mod == 0 ? (base & 0x07) == XV_RBP
-                 || use_sib && base == XV_RBP ? 4 : 0
+                 || use_sib && base == XV_RBP
+                 || xv_x64_segp(insn) ? 4 : 0
       : mod == 1 ? 1
       : mod == 2 ? 4 : 0;
 
     /* Now parse out the intent through Intel's minefield of special cases. */
-    insn->addr = mod == 3                   ? XV_ADDR_REG
-               : !mod && base == XV_RBP     ? XV_ADDR_RIPREL
-               : !mod && use_sib
-                      && base == XV_RBP
-                      && index == XV_RSP    ? XV_ADDR_ZEROREL
-               : use_sib && index == XV_RSP ? XV_ADDR_BASE
-               :                              XV_ADDR_SCALE_BIT | scale;
+    insn->addr =
+        use_sib ? !mod && base  == XV_RBP
+                       && index == XV_RSP ? XV_ADDR_ZEROREL
+                : index == XV_RSP         ? XV_ADDR_BASE
+                :                           XV_ADDR_SCALE_BIT | scale
+      :           mod == 3                ? XV_ADDR_REG
+                : xv_x64_segp(insn)       ? XV_ADDR_ZEROREL
+                : !mod && base == XV_RBP  ? XV_ADDR_RIPREL
+                                          : XV_ADDR_BASE;
 
     insn->reg   = reg;          /* always defined */
     insn->base  = base;         /* always defined */
-    insn->index = index;        /* undefined if no SIB byte */
+    insn->index = index;        /* defined iff SIB */
 
     /* Now read little-endian displacement. */
     if ((offset += displacement_bytes) >= buf->capacity) return XV_READ_ENDD;
@@ -532,6 +537,13 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
       stage[index++] = 0xc0 | insn->reg << 3 & 0x38
                             | insn->base     & 0x07;
     } else {
+      /* It's fine to write a SIB byte with %rsp as the index register, but
+       * it's Intel's way of eliminating the scale. So if the intent of the
+       * instruction is to scale by %rsp, then we need to die here because
+       * there isn't a way to encode that. */
+      if (insn->addr & XV_ADDR_SCALE_BIT && insn->index == XV_RSP)
+        return XV_WR_EIND;
+
       int const displacement_min_bytes =
           !insn->displacement                 ? 0
         : xv_overflowp(insn->displacement, 8) ? 4
@@ -540,18 +552,18 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
       /* In certain cases, x86 machine code won't be able to encode the
        * displacement as such. So we may need to increase the size if, for
        * instance, we're RIP-relative or zero-relative. */
-      int const sib_escaped        = (insn->base & 0x07) == XV_RBP;
+      int const sib_escaped        = (insn->base & 0x07) == XV_RSP;
       int const displacement_bytes =
           insn->addr == XV_ADDR_RIPREL
           || insn->addr == XV_ADDR_ZEROREL ? 4
-        : insn->addr == XV_ADDR_REG        ? 0
         : sib_escaped                      ? displacement_min_bytes > 1
                                              ? displacement_min_bytes : 1
         :                                    displacement_min_bytes;
 
       int const sib_required = sib_escaped
                             || insn->addr & XV_ADDR_SCALE_BIT
-                            || insn->addr == XV_ADDR_ZEROREL;
+                            || insn->addr == XV_ADDR_ZEROREL
+                               && !xv_x64_segp(insn);
 
       xv_x64_i const mod = displacement_bytes == 0 ? 0
                          : displacement_bytes == 1 ? 0x40
@@ -565,7 +577,7 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
         /* Now encode SIB byte, including all wonky cases. */
         stage[index++] =
             insn->addr == XV_ADDR_ZEROREL ? XV_RSP << 3 | XV_RBP
-          : insn->addr == XV_ADDR_BASE    ? XV_RSP << 3 | insn->base
+          : insn->addr == XV_ADDR_BASE    ? XV_RSP << 3 | insn->base & 0x07
           : /* normal SIB */ (insn->addr & XV_ADDR_SCALE_MASK) << 6
                              | insn->index << 3 & 0x38
                              | insn->base       & 0x07;
@@ -573,7 +585,7 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
         /* Encode ModR/M byte normally, considering the amount of displacement
          * to use. */
         stage[index++] = mod | insn->reg << 3 & 0x38
-                             | insn->index    & 0x07;
+                             | insn->base     & 0x07;
       }
 
       for (int i = 0; i < displacement_bytes; ++i)
@@ -711,7 +723,6 @@ int xv_x64_print_insn(char              *const buf,
                                      str("[= "),
                                      hex(insn->rip + insn->immediate, 16),
                                      str("]");
-
 #undef back
 #undef str
 #undef hex

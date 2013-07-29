@@ -27,9 +27,8 @@ int main(int const argc, char const *const *const argv) {
   if (buf.start == (void *const) -1) return 3;
 
   printf("initialized buffer; printing bytes...\n");
-  for (int i = 0;
-       i < buf.capacity;
-       i & 0x0f || printf("\n%04x: ", i), ++i)
+  for (int i = 0; i < buf.capacity; ++i)
+    i & 0x0f || printf("\n%04x: ", i),
     printf("%02x ", buf.start[i]);
 
   printf("\n");
@@ -56,9 +55,8 @@ int main(int const argc, char const *const *const argv) {
   printf("last write status code: %d\n", write_status);
 
   printf("printing bytes...\n");
-  for (int i = 0;
-       i < buf.capacity;
-       i & 0x07 || printf("\n%04x: ", i), ++i)
+  for (int i = 0; i < buf.capacity; ++i)
+    i & 0x07 || printf("\n%04x: ", i),
     printf("%02x\033[%s%02x\033[0;0m ",
            buf.start[i],
            buf.start[i] == rewritten.start[i] ? "0;32m" : "1;31m",
