@@ -347,7 +347,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
       insn->aux    =   (current & 0x78) >> 3 ^ 0x0f;    /* VEX.vvvv */
       insn->vex_l  = !!(current & 0x04);
       insn->p66   |= current == 0x01;                   /* VEX.pp */
-      insn->p2     = (current & 0x03) == 2 ? XV_INSN_REPZ
+      insn->p1     = (current & 0x03) == 2 ? XV_INSN_REPZ
                    : (current & 0x03) == 3 ? XV_INSN_REPNZ
                    : insn->p2;
     }
