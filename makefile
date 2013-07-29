@@ -1,4 +1,4 @@
-XV_CC_OPTS = -Wall -Wno-parentheses -Wno-unused-value -std=gnu99
+XV_CC_OPTS = -g -Wall -Wno-parentheses -Wno-unused-value -std=gnu99
 XV_OBJ     = build/xv-x64.o
 XV_TEST    = test/disasm test/disasm.bin
 XV_DOC     = $(subst .sdoc,.md,$(wildcard *.sdoc))

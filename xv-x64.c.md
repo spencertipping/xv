@@ -257,7 +257,8 @@ isn't a problem.
 
 Note that the first time you "reallocate" a buffer, it should have a zero
 start-pointer. Otherwise this call will do nothing and return an error code
-because it will think it couldn't free memory.
+because it will think it couldn't free memory. You can free an ibuffer by
+reallocating it to size 0.
 
 ```c
 int xv_x64_reallocate_ibuffer(xv_x64_ibuffer *const buf,
@@ -286,10 +287,10 @@ int xv_x64_reallocate_ibuffer(xv_x64_ibuffer *const buf,
 ```
 
 ```c
-    buf->start    = region;
+    buf->current  = buf->start = region;
     buf->capacity = rounded;
   } else {
-    buf->start    = NULL;
+    buf->current  = buf->start = NULL;
     buf->capacity = 0;
   }
 ```
@@ -367,7 +368,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
   /* Look for group 1, 2, 3, and 4 prefixes, ignoring each one after we see the
    * first. We're done looking if we hit the end of the input stream, or if we
    * see anything that isn't a prefix. */
-  if (offset >= buf->capacity) return XV_READ_ENDP;
+  if (offset >= buf->capacity) return XV_READ_END;
   for (unsigned g1p, g2p, g3p, g4p, current = buf->start[offset];
 ```
 
@@ -516,7 +517,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 
 ```c
     int const displacement_bytes =
-        mod == 0 ? (reg & 0x07) == XV_RBP
+        mod == 0 ? (base & 0x07) == XV_RBP
                  || use_sib && base == XV_RBP ? 4 : 0
       : mod == 1 ? 1
       : mod == 2 ? 4 : 0;
@@ -525,12 +526,12 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 ```c
     /* Now parse out the intent through Intel's minefield of special cases. */
     insn->addr = mod == 3                   ? XV_ADDR_REG
-               : !mod && reg == XV_RBP      ? XV_ADDR_RIPREL
+               : !mod && base == XV_RBP     ? XV_ADDR_RIPREL
                : !mod && use_sib
                       && base == XV_RBP
                       && index == XV_RSP    ? XV_ADDR_ZEROREL
                : use_sib && index == XV_RSP ? XV_ADDR_BASE
-               :                              XV_ADDR_SCALE1 | scale;
+               :                              XV_ADDR_SCALE_BIT | scale;
 ```
 
 ```c
@@ -590,7 +591,7 @@ static xv_x64_const_i xv_g2v[7] = { 0x00, 0x2e, 0x36, 0x3e, 0x26, 0x64, 0x65 };
 static inline int xv_overflowp(int64_t  const x,
                                unsigned const bits) {
   int64_t const high = x >> bits;
-  return high == 0 || high == -1;
+  return high != 0 && high != -1;
 }
 ```
 
@@ -760,7 +761,7 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
 
 ```c
   if (buf->current + index >= buf->start + buf->capacity) return XV_WR_END;
-  strncpy(buf->current, stage, index);
+  memcpy(buf->current, stage, index);
   buf->current += index;
   return XV_WR_CONT;
 }
@@ -937,7 +938,7 @@ int xv_x64_print_insn(char              *const buf,
 
 ```c
   if (index > size) return 0;
-  strncpy(buf, stage, index);
+  memcpy(buf, stage, index);
   return index;
 }
 ```

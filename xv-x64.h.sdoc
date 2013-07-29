@@ -259,7 +259,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *buf,
 /* Possible return values for xv_x64_read_insn */
 #define XV_READ_ERR  -1 /* internal error; read errno */
 #define XV_READ_CONT  0 /* no problems; can read next instruction */
-#define XV_READ_ENDP  1 /* hit end of stream, expecting prefix */
+#define XV_READ_END   1 /* hit end of stream, no more instructions */
 #define XV_READ_ENDV2 2 /* hit end of stream, expecting VEX byte 2 */
 #define XV_READ_ENDV3 3 /* hit end of stream, expecting VEX byte 3 */
 #define XV_READ_ENDO1 4 /* hit end of stream, expecting opcode (no [RV]EX) */
