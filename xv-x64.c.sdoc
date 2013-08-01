@@ -446,6 +446,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
       current = buf->start[offset];
       scale   =               (current & 0xc0) >> 6;
       index   = insn->index | (current & 0x38) >> 3;
+      base    = insn->base & 0x08 | current & 0x07;
     }
 
     int const displacement_bytes =
@@ -462,8 +463,8 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
                 : index == XV_RSP         ? XV_ADDR_BASE
                 :                           XV_ADDR_SCALE_BIT | scale
       :           mod == 3                ? XV_ADDR_REG
-                : !mod && base == XV_RBP  ? xv_x64_segp(insn) ? XV_ADDR_ZEROREL
-                                                              : XV_ADDR_RIPREL
+                : !mod && base == XV_RBP  ? insn->p2 ? XV_ADDR_ZEROREL
+                                                     : XV_ADDR_RIPREL
                                           : XV_ADDR_BASE;
 
     insn->reg   = reg;          /* always defined */
@@ -478,10 +479,11 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 
     xv_x64_trace(0,
                  "xv_x64_read_insn(%x) parsed modR/M and SIB:\n"
-                 "  addr = %d, reg = %x, base = %x, index = %x\n"
-                 "  disp(%d) = %x\n",
-                 offset, insn->addr, insn->reg, insn->base,
-                 insn->index, displacement_bytes, insn->displacement);
+                 "  mod = %d, addr = %d, reg = %x, base = %x, index = %x\n"
+                 "  use_sib = %d, disp(%d) = %x\n",
+                 offset, mod, insn->addr, insn->reg, insn->base,
+                 insn->index, use_sib,
+                 displacement_bytes, (unsigned) insn->displacement);
   }
 
   /* And read the immediate data, little-endian. */
@@ -635,10 +637,11 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
       int const sib_escaped        = (insn->base & 0x07) == XV_RSP;
       int const displacement_bytes =
           insn->addr == XV_ADDR_RIPREL
-          || insn->addr == XV_ADDR_ZEROREL ? 4
+          || insn->addr == XV_ADDR_ZEROREL
+             && !insn->p2                  ? 4
         : sib_escaped                      ? displacement_min_bytes > 1
-                                             ? displacement_min_bytes : 1
-        :                                    displacement_min_bytes;
+                                           ? displacement_min_bytes : 1
+        :                                  displacement_min_bytes;
 
       int const sib_required = sib_escaped
                             || insn->addr & XV_ADDR_SCALE_BIT

@@ -9,22 +9,40 @@
 
 /* Reads instructions from the given flat file, printing each opcode */
 int main(int const argc, char const *const *const argv) {
-  int const fd = open(argv[1], O_RDONLY);
-  if (fd == -1) return 1;
+  if (argc != 3) {
+    printf("usage: %s infile outfile\n", argv[0]);
+    return 1;
+  }
+
+  int const fd  = open(argv[1], O_RDONLY);
+  int const wfd = open(argv[2], O_RDWR);
+
+  if (fd == -1 || wfd == -1) {
+    printf("failed to open either input or output file (do both exist?)\n");
+    return 1;
+  }
 
   struct stat s;
   if (fstat(fd, &s)) return 2;
 
+  unsigned const size = s.st_size + 4095 & ~4095;
+
   xv_x64_const_ibuffer buf;
   buf.current = buf.start
-              = mmap(NULL, s.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-
-  xv_x64_ibuffer rewritten = { .start = 0 };
-  xv_x64_reallocate_ibuffer(&rewritten, s.st_size);
+              = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
 
   buf.logical_start = 0;
   buf.capacity = s.st_size;
   if (buf.start == (void *const) -1) return 3;
+
+  xv_x64_ibuffer rewritten;
+  rewritten.current = rewritten.start
+                    = mmap(NULL, size, PROT_READ | PROT_WRITE,
+                           MAP_SHARED, wfd, 0);
+
+  rewritten.logical_start = 0;
+  rewritten.capacity = s.st_size;
+  if (rewritten.start == (void *const) -1) return 4;
 
   printf("initialized buffer; printing bytes...\n");
   for (int i = 0; i < buf.capacity; ++i)
@@ -62,8 +80,8 @@ int main(int const argc, char const *const *const argv) {
            buf.start[i] == rewritten.start[i] ? "0;32m" : "1;31m",
            rewritten.start[i]);
 
-  munmap((void*) buf.start, buf.capacity);
-  munmap(rewritten.start, rewritten.capacity);
+  munmap((void*) buf.start, size);
+  munmap(rewritten.start, size);
   close(fd);
   return 0;
 }
