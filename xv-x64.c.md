@@ -19,6 +19,15 @@ assembly-language syscall intercept.
 #include <sys/types.h>
 ```
 
+```c
+#if XV_DEBUG_X64
+#include <stdio.h>
+#define xv_x64_trace xv_trace
+#else
+#define xv_x64_trace xv_no_trace
+#endif
+```
+
 # Operand encoding table
 
 Enough of an approximation of each instruction's operand encoding that we can
@@ -150,7 +159,8 @@ xv_x64_insn_encoding const xv_x64_insn_encodings[1024] = {
                     R2(XV_INVALID),
                     XV_INVALID,
                     XV_MODRM_MEM | XV_IMM_NONE,         /* prefetchw */
-                    R2(XV_INVALID),
+                    XV_INVALID,
+                    XV_MODRM_MEM | XV_IMM_I8,           /* 3DNow! */
 ```
 
 ```c
@@ -329,6 +339,13 @@ instruction.
 ```
 
 ```c
+/* XOP parsing is complicated by the fact that we may be looking at a POP
+ * opcode; we differentiate by looking at one of the bits in the next byte. */
+#define XV_XOPP(x, has_next, next) \
+  ((x) == 0x8f && (has_next) && (next) & 0x08)
+```
+
+```c
 #define XV_OPESC1P(x) ((x) == 0x0f)
 #define XV_OPESC2P(x) ((x) == 0x38 || (x) == 0x3a)
 ```
@@ -360,6 +377,30 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 ```
 
 ```c
+#define READ_ERROR(reason) \
+  return xv_x64_trace(XV_READ_##reason, \
+                      "xv_x64_read_insn(%x): " #reason "\n", offset)
+```
+
+```c
+#define CHECK_BOUNDS(code) \
+  do { \
+    if (offset > buf->capacity) READ_ERROR(code); \
+  } while (0);
+```
+
+```c
+#define INC_AND_CHECK_BOUNDS(code) \
+  do { \
+    if (++offset > buf->capacity) READ_ERROR(code); \
+  } while (0);
+```
+
+```c
+  xv_x64_trace(0, "xv_x64_read_insn(%x) starting\n", offset);
+```
+
+```c
   memset(insn, 0, sizeof(xv_x64_insn));
   insn->start = buf->current - buf->start + buf->logical_start;
 ```
@@ -368,7 +409,10 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
   /* Look for group 1, 2, 3, and 4 prefixes, ignoring each one after we see the
    * first. We're done looking if we hit the end of the input stream, or if we
    * see anything that isn't a prefix. */
-  if (offset >= buf->capacity) return XV_READ_END;
+  CHECK_BOUNDS(END);
+```
+
+```c
   for (unsigned g1p = 0, g2p = 0, g3p = 0, g4p = 0,
                 current = buf->start[offset];
 ```
@@ -403,16 +447,25 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 ```
 
 ```c
+  xv_x64_trace(0, "xv_x64_read_insn(%x) parsed prefixes: %d, %d, %d, %d\n",
+                  offset,
+                  insn->p1, insn->p2, insn->p66, insn->p67);
+```
+
+```c
   /* Now look for REX and VEX prefixes. If there are multiple (technically
-   * disallowed), we will get wonky results. */
-  if (offset >= buf->capacity) return XV_READ_ENDO1;
-  for (unsigned rexp  = 0, vex2p   = 0,
-                vex3p = 0, current = buf->start[offset];
+   * disallowed), we will get wonky results. Also scan for XOP prefixes, which
+   * are AMD-specific and can overlap with the POP instruction. */
+  CHECK_BOUNDS(ENDO1);
+  for (unsigned rexp  = 0, vex2p = 0,
+                vex3p = 0, xopp  = 0, current = buf->start[offset];
 ```
 
 ```c
        offset < buf->capacity
          && ((rexp  =  XV_REXP(current = buf->start[offset])) ||
+             (xopp  =  XV_XOPP(current, offset + 1 < buf->capacity,
+                                        buf->start[offset + 1])) ||
              (vex2p = XV_VEX2P(current)) ||
              (vex3p = XV_VEX3P(current)));
 ```
@@ -420,31 +473,34 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 ```c
        ++offset,
        insn->vex   |= vex2p || vex3p,
+       insn->xop   |= xopp,
        insn->rex_w |= rexp && !!(current & 0x08),
        insn->reg   |= rexp &&   (current & 0x04) << 1,  /* REX.R */
        insn->index |= rexp &&   (current & 0x02) << 2,  /* REX.X */
        insn->base  |= rexp &&   (current & 0x01) << 3,  /* REX.B */
-       rexp = vex2p = vex3p = 0)
+       rexp = xopp = vex2p = vex3p = 0)
 ```
 
 ```c
-    if (vex2p || vex3p) {
+    if (vex2p || xopp || vex3p) {
       if (vex2p) {
-        if (++offset >= buf->capacity) return XV_READ_ENDV2;
+        INC_AND_CHECK_BOUNDS(ENDV2);
         current = buf->start[offset];
         insn->escape = XV_INSN_ESC1;                    /* implied */
         insn->reg    = !(current & 0x80) << 3;          /* VEX.R */
-      } else if (vex3p) {
-        if (++offset >= buf->capacity) return XV_READ_ENDV2;
+      } else if (xopp || vex3p) {
+        INC_AND_CHECK_BOUNDS(ENDV2);
         current = buf->start[offset];
         insn->reg    = !(current & 0x80) << 3;          /* VEX.R */
         insn->index  = !(current & 0x40) << 3;          /* VEX.X */
         insn->base   = !(current & 0x20) << 3;          /* VEX.B */
-        insn->escape = current & 0x1f;                  /* VEX.m-mmmm */
 ```
 
 ```c
-        if (++offset >= buf->capacity) return XV_READ_ENDV3;
+        /* Mask out high bits in XOP prefixes. AMD sets bit 3 to differentiate
+         * XOP prefixes from POP instructions. */
+        insn->escape = current & 0x07;                  /* VEX.m-mmmm */
+        INC_AND_CHECK_BOUNDS(ENDV3);
         current = buf->start[offset];
         insn->rex_w = !!(current & 0x80);               /* VEX.W */
       }
@@ -461,28 +517,49 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 ```
 
 ```c
+  xv_x64_trace(0,
+               "xv_x64_read_insn(%x) vex: %d rex.w: %d vex.l: %d\n",
+               offset, insn->vex, insn->rex_w, insn->vex_l);
+```
+
+```c
   /* By this point we've read all prefixes except for opcode escapes. Now look
    * for those. */
-  if (offset >= buf->capacity) return XV_READ_ENDO2;
+  CHECK_BOUNDS(ENDO2);
+```
+
+```c
   if (XV_OPESC1P(buf->start[offset])) {
     /* We have a 0x0f prefix; now see whether we have either 0x38 or 0x3a */
-    if (++offset >= buf->capacity) return XV_READ_ENDO3;
+    INC_AND_CHECK_BOUNDS(ENDO3);
 ```
 
 ```c
     unsigned current = buf->start[offset];
     if (XV_OPESC2P(current)) {
       insn->escape = current == 0x38 ? XV_INSN_ESC238 : XV_INSN_ESC23A;
-      if (++offset >= buf->capacity) return XV_READ_ENDO4;
+      INC_AND_CHECK_BOUNDS(ENDO4);
     } else
       insn->escape = 1;
   }
 ```
 
 ```c
+  xv_x64_trace(0,
+               "xv_x64_read_insn(%x) got opcode escape %d\n",
+               offset, insn->escape);
+```
+
+```c
   insn->opcode = buf->start[offset];
   if (xv_x64_insn_encodings[xv_x64_insn_key(insn)] == XV_INVALID)
-    return XV_READ_INV;
+    READ_ERROR(INV);
+```
+
+```c
+  xv_x64_trace(0,
+               "xv_x64_read_insn(%x) got opcode %x\n",
+               offset, insn->opcode);
 ```
 
 ```c
@@ -496,7 +573,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
   /* If we use ModR/M, parse that byte and check for SIB. Then parse through
    * the special cases to decode intent. */
   if (enc & XV_MODRM_MASK) {
-    if (++offset >= buf->capacity) return XV_READ_ENDM;
+    INC_AND_CHECK_BOUNDS(ENDM);
     unsigned current = buf->start[offset];
     unsigned mod     = (current & 0xc0) >> 6;
     unsigned reg     = insn->reg  | (current & 0x38) >> 3;
@@ -510,7 +587,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 
 ```c
     if (use_sib = mod != 3 && (current & 0x07) == XV_RSP) {
-      if (++offset >= buf->capacity) return XV_READ_ENDS;
+      INC_AND_CHECK_BOUNDS(ENDS);
       current = buf->start[offset];
       scale   =               (current & 0xc0) >> 6;
       index   = insn->index | (current & 0x38) >> 3;
@@ -520,10 +597,10 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 ```c
     int const displacement_bytes =
         mod == 0 ? (base & 0x07) == XV_RBP
-                 || use_sib && base == XV_RBP
-                 || xv_x64_segp(insn) ? 4 : 0
+                   || use_sib && base == XV_RBP ? 4 : 0
       : mod == 1 ? 1
-      : mod == 2 ? 4 : 0;
+      : mod == 2 ? 4
+      :            0;
 ```
 
 ```c
@@ -534,8 +611,8 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
                 : index == XV_RSP         ? XV_ADDR_BASE
                 :                           XV_ADDR_SCALE_BIT | scale
       :           mod == 3                ? XV_ADDR_REG
-                : xv_x64_segp(insn)       ? XV_ADDR_ZEROREL
-                : !mod && base == XV_RBP  ? XV_ADDR_RIPREL
+                : !mod && base == XV_RBP  ? xv_x64_segp(insn) ? XV_ADDR_ZEROREL
+                                                              : XV_ADDR_RIPREL
                                           : XV_ADDR_BASE;
 ```
 
@@ -547,18 +624,35 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 
 ```c
     /* Now read little-endian displacement. */
-    if ((offset += displacement_bytes) >= buf->capacity) return XV_READ_ENDD;
+    offset += displacement_bytes;
+    CHECK_BOUNDS(ENDD);
     for (int i = 0; i < displacement_bytes; ++i)
       insn->displacement = insn->displacement << 8 | buf->start[offset - i];
+```
+
+```c
+    xv_x64_trace(0,
+                 "xv_x64_read_insn(%x) parsed modR/M and SIB:\n"
+                 "  addr = %d, reg = %x, base = %x, index = %x\n"
+                 "  disp(%d) = %x\n",
+                 offset, insn->addr, insn->reg, insn->base,
+                 insn->index, displacement_bytes, insn->displacement);
   }
 ```
 
 ```c
   /* And read the immediate data, little-endian. */
   int const immediate_size = xv_x64_immediate_bytes(insn);
-  if ((offset += immediate_size) >= buf->capacity) return XV_READ_ENDI;
+  offset += immediate_size;
+  CHECK_BOUNDS(ENDI);
   for (int i = 0; i < immediate_size; ++i)
     insn->immediate = insn->immediate << 8 | buf->start[offset - i];
+```
+
+```c
+  xv_x64_trace(0,
+               "xv_x64_read_insn(%x) imm(%d) = %llx\n",
+               offset, immediate_size, (uint64_t) insn->immediate);
 ```
 
 ```c
@@ -567,6 +661,12 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
    * %rip-relative displacement. */
   buf->current = buf->start + ++offset;
   insn->rip    = buf->current - buf->start + buf->logical_start;
+```
+
+```c
+#undef READ_ERROR
+#undef CHECK_BOUNDS
+#undef INC_AND_CHECK_BOUNDS
 ```
 
 ```c
@@ -610,15 +710,22 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
 ```
 
 ```c
+#define WRITE_ERROR(reason) \
+  return xv_x64_trace(XV_WR_##reason, \
+                      "xv_x64_write_insn(%x): " #reason "\n", \
+                      (unsigned) (buf->current - buf->start))
+```
+
+```c
   /* Validity check: is the opcode known to be invalid? */
-  if (enc == XV_INVALID) return XV_WR_INV;
+  if (enc == XV_INVALID) WRITE_ERROR(INV);
 ```
 
 ```c
   /* Validity check: are we trying to encode an immediate larger than what the
    * instruction supports? */
   if (xv_overflowp(insn->immediate, 8 * xv_x64_immediate_bytes(insn)))
-    return XV_WR_EOP;
+    WRITE_ERROR(EOP);
 ```
 
 ```c
@@ -631,7 +738,7 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
 
 ```c
   /* Encode any REX or VEX prefix */
-  if (insn->vex) {
+  if (insn->vex || insn->xop) {
     /* Preserve VEX */
     xv_x64_i const vvvv_l_pp = (~insn->aux & 0x0f) << 3
                              | insn->vex_l         << 2
@@ -639,21 +746,28 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
 ```
 
 ```c
-    if (insn->escape != XV_INSN_ESC1
+    if (insn->xop
+        || insn->escape != XV_INSN_ESC1
         || insn->rex_w
-        || 0x08 & (insn->index | insn->base | insn->reg))
+        || 0x08 & (insn->index | insn->base | insn->reg)) {
       /* Need a three-byte prefix */
-      stage[index++] = 0xc4,
+      xv_x64_i const xop_compatibility_bit = insn->xop << 3;
+```
+
+```c
+      stage[index++] = 0xc4;
       stage[index++] = (1 & ~insn->reg   >> 3) << 7
                      | (insn->addr & XV_ADDR_SCALE_BIT &&
                         1 & ~insn->index >> 3) << 6
                      | (1 & ~insn->base  >> 3) << 5
-                     | insn->escape,
+                     | xop_compatibility_bit
+                     | insn->escape;
       stage[index++] = insn->rex_w << 7 | vvvv_l_pp;
-    else
+    } else {
       /* Two-byte prefix */
-      stage[index++] = 0xc5,
+      stage[index++] = 0xc5;
       stage[index++] = (1 & ~insn->reg >> 3) << 7 | vvvv_l_pp;
+    }
   } else {
     if (insn->rex_w || 0x08 & (insn->reg | insn->index | insn->base))
       /* REX is required */
@@ -691,7 +805,7 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
   if (enc & XV_MODRM_MASK) {
     if (insn->addr == XV_ADDR_REG) {
       /* Easy case: just encode the register with mod = 3. */
-      if (insn->displacement) return XV_WR_EDISP;
+      if (insn->displacement) WRITE_ERROR(EDISP);
       stage[index++] = 0xc0 | insn->reg << 3 & 0x38
                             | insn->base     & 0x07;
     } else {
@@ -700,7 +814,7 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
        * instruction is to scale by %rsp, then we need to die here because
        * there isn't a way to encode that. */
       if (insn->addr & XV_ADDR_SCALE_BIT && insn->index == XV_RSP)
-        return XV_WR_EIND;
+        WRITE_ERROR(EIND);
 ```
 
 ```c
@@ -726,8 +840,7 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
 ```c
       int const sib_required = sib_escaped
                             || insn->addr & XV_ADDR_SCALE_BIT
-                            || insn->addr == XV_ADDR_ZEROREL
-                               && !xv_x64_segp(insn);
+                            || insn->addr == XV_ADDR_ZEROREL;
 ```
 
 ```c
@@ -760,6 +873,13 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
 ```
 
 ```c
+      xv_x64_trace(0,
+                   "xv_x64_write_insn(%x) dispsize = %d, sib = %d, mod = %d\n",
+                   buf->current - buf->start,
+                   displacement_bytes, sib_required, mod);
+```
+
+```c
       for (int i = 0; i < displacement_bytes; ++i)
         stage[index++] = insn->displacement >> i * 8 & 0xff;
     }
@@ -768,15 +888,22 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
 
 ```c
   int const immediate_bytes = xv_x64_immediate_bytes(insn);
-  if (!immediate_bytes && insn->immediate) return XV_WR_EIMM;
+  if (!immediate_bytes && insn->immediate) WRITE_ERROR(EIMM);
   for (int i = 0; i < immediate_bytes; ++i)
     stage[index++] = insn->immediate >> i * 8 & 0xff;
 ```
 
 ```c
-  if (buf->current + index >= buf->start + buf->capacity) return XV_WR_END;
+  if (buf->current + index >= buf->start + buf->capacity) WRITE_ERROR(END);
   memcpy(buf->current, stage, index);
   buf->current += index;
+```
+
+```c
+#undef WRITE_ERROR
+```
+
+```c
   return XV_WR_CONT;
 }
 ```
@@ -852,7 +979,7 @@ int xv_x64_print_insn(char              *const buf,
 ```
 
 ```c
-  hex(insn->start, 16);
+  hex((int64_t) insn->start, 16);
   str("(");
   hex(insn->rip - insn->start, 1);
   str(")");
@@ -899,7 +1026,7 @@ int xv_x64_print_insn(char              *const buf,
 ```c
       case XV_ADDR_RIPREL:
         hex(insn->displacement, -8), str("(%rip) [= "),
-        hex(insn->rip + insn->displacement, 16), str("]");
+        hex((int64_t) insn->rip + insn->displacement, 16), str("]");
         break;
 ```
 
@@ -936,7 +1063,8 @@ int xv_x64_print_insn(char              *const buf,
   if (enc & XV_IMM_INVARIANT_MASK) hex(insn->immediate, -16);
   else if (enc & XV_IMM_MASK)      hex(insn->immediate, -16),
                                      str("[= "),
-                                     hex(insn->rip + insn->immediate, 16),
+                                     hex((int64_t) insn->rip + insn->immediate,
+                                         16),
                                      str("]");
 #undef back
 #undef str

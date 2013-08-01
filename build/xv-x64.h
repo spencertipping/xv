@@ -156,6 +156,7 @@ struct xv_x64_insn {
   unsigned p66    : 1;          /* 0x66 prefix? */
   unsigned p67    : 1;          /* 0x67 prefix? */
   unsigned rex_w  : 1;          /* presence of REX.W (can exist with VEX) */
+  unsigned xop    : 1;          /* encoded with xop? (AMD-specific) */
   unsigned vex    : 1;          /* encoded with vex? (changes semantics) */
   unsigned vex_l  : 1;          /* presence of VEX.L (implies VEX) */
 
