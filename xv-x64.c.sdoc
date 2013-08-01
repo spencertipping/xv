@@ -358,9 +358,9 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
        insn->vex   |= vex2p || vex3p,
        insn->xop   |= xopp,
        insn->rex_w |= rexp && !!(current & 0x08),
-       insn->reg   |= rexp &&   (current & 0x04) << 1,  /* REX.R */
-       insn->index |= rexp &&   (current & 0x02) << 2,  /* REX.X */
-       insn->base  |= rexp &&   (current & 0x01) << 3,  /* REX.B */
+       insn->reg   |= rexp ?   (current & 0x04) << 1 : 0,       /* REX.R */
+       insn->index |= rexp ?   (current & 0x02) << 2 : 0,       /* REX.X */
+       insn->base  |= rexp ?   (current & 0x01) << 3 : 0,       /* REX.B */
        rexp = xopp = vex2p = vex3p = 0)
 
     if (vex2p || xopp || vex3p) {
@@ -528,7 +528,8 @@ static xv_x64_const_i xv_g2v[7] = { 0x00, 0x2e, 0x36, 0x3e, 0x26, 0x64, 0x65 };
 static inline int xv_overflowp(int64_t  const x,
                                unsigned const bits) {
   int64_t const high = x >> bits;
-  return high != 0 && high != -1;
+  int64_t const low  = x & (1 << bits) - 1;
+  return high != 0 && high != -1 || x < 0 != low < 0;
 }
 
 int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
@@ -637,8 +638,7 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
       int const sib_escaped        = (insn->base & 0x07) == XV_RSP;
       int const displacement_bytes =
           insn->addr == XV_ADDR_RIPREL
-          || insn->addr == XV_ADDR_ZEROREL
-             && !insn->p2                  ? 4
+          || insn->addr == XV_ADDR_ZEROREL ? 4
         : sib_escaped                      ? displacement_min_bytes > 1
                                            ? displacement_min_bytes : 1
         :                                  displacement_min_bytes;
@@ -647,9 +647,10 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
                             || insn->addr & XV_ADDR_SCALE_BIT
                             || insn->addr == XV_ADDR_ZEROREL;
 
-      xv_x64_i const mod = displacement_bytes == 0 ? 0
-                         : displacement_bytes == 1 ? 0x40
-                         :                           0x80;
+      xv_x64_i const mod = insn->addr == XV_ADDR_ZEROREL ? 0
+                         : displacement_bytes == 0       ? 0
+                         : displacement_bytes == 1       ? 0x40
+                         :                                 0x80;
 
       if (sib_required) {
         /* ModR/M needs to encode SIB, the register, and the appropriate number
@@ -806,6 +807,10 @@ int xv_x64_print_insn(char              *const buf,
 
     str(" ");
     if (insn->vex) str("%"), str(register_names[insn->aux]), str(" ");
+  } else {
+    if (insn->reg)   str("rex.r ");
+    if (insn->base)  str("rex.b ");
+    if (insn->index) str("rex.x ");
   }
 
   if (enc & XV_IMM_INVARIANT_MASK) hex(insn->immediate, -16);

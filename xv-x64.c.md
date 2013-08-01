@@ -475,9 +475,9 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
        insn->vex   |= vex2p || vex3p,
        insn->xop   |= xopp,
        insn->rex_w |= rexp && !!(current & 0x08),
-       insn->reg   |= rexp &&   (current & 0x04) << 1,  /* REX.R */
-       insn->index |= rexp &&   (current & 0x02) << 2,  /* REX.X */
-       insn->base  |= rexp &&   (current & 0x01) << 3,  /* REX.B */
+       insn->reg   |= rexp ?   (current & 0x04) << 1 : 0,       /* REX.R */
+       insn->index |= rexp ?   (current & 0x02) << 2 : 0,       /* REX.X */
+       insn->base  |= rexp ?   (current & 0x01) << 3 : 0,       /* REX.B */
        rexp = xopp = vex2p = vex3p = 0)
 ```
 
@@ -591,6 +591,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
       current = buf->start[offset];
       scale   =               (current & 0xc0) >> 6;
       index   = insn->index | (current & 0x38) >> 3;
+      base    = insn->base & 0x08 | current & 0x07;
     }
 ```
 
@@ -611,8 +612,8 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
                 : index == XV_RSP         ? XV_ADDR_BASE
                 :                           XV_ADDR_SCALE_BIT | scale
       :           mod == 3                ? XV_ADDR_REG
-                : !mod && base == XV_RBP  ? xv_x64_segp(insn) ? XV_ADDR_ZEROREL
-                                                              : XV_ADDR_RIPREL
+                : !mod && base == XV_RBP  ? insn->p2 ? XV_ADDR_ZEROREL
+                                                     : XV_ADDR_RIPREL
                                           : XV_ADDR_BASE;
 ```
 
@@ -633,10 +634,11 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *const buf,
 ```c
     xv_x64_trace(0,
                  "xv_x64_read_insn(%x) parsed modR/M and SIB:\n"
-                 "  addr = %d, reg = %x, base = %x, index = %x\n"
-                 "  disp(%d) = %x\n",
-                 offset, insn->addr, insn->reg, insn->base,
-                 insn->index, displacement_bytes, insn->displacement);
+                 "  mod = %d, addr = %d, reg = %x, base = %x, index = %x\n"
+                 "  use_sib = %d, disp(%d) = %x\n",
+                 offset, mod, insn->addr, insn->reg, insn->base,
+                 insn->index, use_sib,
+                 displacement_bytes, (unsigned) insn->displacement);
   }
 ```
 
@@ -696,7 +698,8 @@ static xv_x64_const_i xv_g2v[7] = { 0x00, 0x2e, 0x36, 0x3e, 0x26, 0x64, 0x65 };
 static inline int xv_overflowp(int64_t  const x,
                                unsigned const bits) {
   int64_t const high = x >> bits;
-  return high != 0 && high != -1;
+  int64_t const low  = x & (1 << bits) - 1;
+  return high != 0 && high != -1 || x < 0 != low < 0;
 }
 ```
 
@@ -833,8 +836,8 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
           insn->addr == XV_ADDR_RIPREL
           || insn->addr == XV_ADDR_ZEROREL ? 4
         : sib_escaped                      ? displacement_min_bytes > 1
-                                             ? displacement_min_bytes : 1
-        :                                    displacement_min_bytes;
+                                           ? displacement_min_bytes : 1
+        :                                  displacement_min_bytes;
 ```
 
 ```c
@@ -844,9 +847,10 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
 ```
 
 ```c
-      xv_x64_i const mod = displacement_bytes == 0 ? 0
-                         : displacement_bytes == 1 ? 0x40
-                         :                           0x80;
+      xv_x64_i const mod = insn->addr == XV_ADDR_ZEROREL ? 0
+                         : displacement_bytes == 0       ? 0
+                         : displacement_bytes == 1       ? 0x40
+                         :                                 0x80;
 ```
 
 ```c
@@ -874,7 +878,7 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
 
 ```c
       xv_x64_trace(0,
-                   "xv_x64_write_insn(%x) dispsize = %d, sib = %d, mod = %d\n",
+                   "xv_x64_write_insn(%x) dispsize = %d, sib = %d, mod = %x\n",
                    buf->current - buf->start,
                    displacement_bytes, sib_required, mod);
 ```
@@ -1056,6 +1060,10 @@ int xv_x64_print_insn(char              *const buf,
 ```c
     str(" ");
     if (insn->vex) str("%"), str(register_names[insn->aux]), str(" ");
+  } else {
+    if (insn->reg)   str("rex.r ");
+    if (insn->base)  str("rex.b ");
+    if (insn->index) str("rex.x ");
   }
 ```
 
