@@ -1,0 +1,9 @@
+XV linker script
+Copyright (C) 2013, Spencer Tipping
+Released under the terms of the GPLv3: http://www.gnu.org/licenses/gpl-3.0.txt
+
+# Introduction
+
+XV doesn't behave like a normal program. In particular, it moves itself to
+accommodate memory mapping requests made by the application. This is a
+necessary evil of sharing an address space with the virtualized process.
