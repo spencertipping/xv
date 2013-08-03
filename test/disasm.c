@@ -45,6 +45,8 @@ int main(int const argc, char const *const *const argv) {
       printf("got %d\n", write_status);
       break;
     }
+
+    printf("instruction length: %d\n", xv_x64_write_insn(NULL, &insn));
   }
 
   printf("after loop\n");

@@ -716,7 +716,8 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
 #define WRITE_ERROR(reason) \
   return xv_x64_trace(XV_WR_##reason, \
                       "xv_x64_write_insn(%x): " #reason "\n", \
-                      (unsigned) (buf->current - buf->start))
+                      buf ? (unsigned) (buf->current - buf->start) \
+                          : 0)
 ```
 
 ```c
@@ -879,7 +880,7 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
 ```c
       xv_x64_trace(0,
                    "xv_x64_write_insn(%x) dispsize = %d, sib = %d, mod = %x\n",
-                   buf->current - buf->start,
+                   buf ? buf->current - buf->start : 0,
                    displacement_bytes, sib_required, mod);
 ```
 
@@ -898,17 +899,18 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
 ```
 
 ```c
-  if (buf->current + index >= buf->start + buf->capacity) WRITE_ERROR(END);
-  memcpy(buf->current, stage, index);
-  buf->current += index;
+  if (buf) {
+    if (buf->current + index >= buf->start + buf->capacity) WRITE_ERROR(END);
+    memcpy(buf->current, stage, index);
+    buf->current += index;
+    return XV_WR_CONT;
+  } else {
+    return index;
+  }
 ```
 
 ```c
 #undef WRITE_ERROR
-```
-
-```c
-  return XV_WR_CONT;
 }
 ```
 

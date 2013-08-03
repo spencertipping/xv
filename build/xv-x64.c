@@ -542,7 +542,8 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
 #define WRITE_ERROR(reason) \
   return xv_x64_trace(XV_WR_##reason, \
                       "xv_x64_write_insn(%x): " #reason "\n", \
-                      (unsigned) (buf->current - buf->start))
+                      buf ? (unsigned) (buf->current - buf->start) \
+                          : 0)
 
   /* Validity check: is the opcode known to be invalid? */
   if (enc == XV_INVALID) WRITE_ERROR(INV);
@@ -673,7 +674,7 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
 
       xv_x64_trace(0,
                    "xv_x64_write_insn(%x) dispsize = %d, sib = %d, mod = %x\n",
-                   buf->current - buf->start,
+                   buf ? buf->current - buf->start : 0,
                    displacement_bytes, sib_required, mod);
 
       for (int i = 0; i < displacement_bytes; ++i)
@@ -686,13 +687,16 @@ int xv_x64_write_insn(xv_x64_ibuffer    *const buf,
   for (int i = 0; i < immediate_bytes; ++i)
     stage[index++] = insn->immediate >> i * 8 & 0xff;
 
-  if (buf->current + index >= buf->start + buf->capacity) WRITE_ERROR(END);
-  memcpy(buf->current, stage, index);
-  buf->current += index;
+  if (buf) {
+    if (buf->current + index >= buf->start + buf->capacity) WRITE_ERROR(END);
+    memcpy(buf->current, stage, index);
+    buf->current += index;
+    return XV_WR_CONT;
+  } else {
+    return index;
+  }
 
 #undef WRITE_ERROR
-
-  return XV_WR_CONT;
 }
 
 /* Instruction printing logic. */

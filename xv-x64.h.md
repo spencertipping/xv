@@ -18,7 +18,6 @@ interpreted in 64-bit mode, not 32-bit compatibility mode.
 ```
 
 ```h
-#include <elf.h>
 #include <stdint.h>
 #include <sys/types.h>
 ```
@@ -261,6 +260,12 @@ struct xv_x64_insn {
 ```
 
 ```h
+/* Forcing displacement values (used for dynamic linking) */
+#define XV_DISP_8  0x7f
+#define XV_DISP_32 0x7fffffff
+```
+
+```h
 /* Instruction table index of given insn */
 #define xv_x64_insn_key(insn_ptr) \
   ({ \
@@ -284,7 +289,10 @@ int xv_x64_syscallp(xv_x64_insn const *insn);
 /* Write a single instruction into the specified buffer, resizing backing
  * allocation structures as necessary. The buffer's "current" pointer is
  * advanced to the next free position. If errors occur, *buf will be
- * unchanged. */
+ * unchanged.
+ *
+ * If buf == NULL, returns the number of bytes that would be used to write the
+ * instruction. */
 int xv_x64_write_insn(xv_x64_ibuffer    *buf,
                       xv_x64_insn const *insn);
 ```
@@ -340,7 +348,7 @@ int xv_x64_read_insn(xv_x64_const_ibuffer *buf,
 ```h
 /* Rewrite a single instruction from src to dst, updating either both or
  * neither */
-int xv_x64_step_rw(xv_x64_rewriter* rw);
+int xv_x64_step_rw(xv_x64_rewriter *rw);
 ```
 
 ```h
