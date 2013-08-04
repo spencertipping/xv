@@ -3,14 +3,11 @@
 /* Released under the terms of the GPLv3: http://www.gnu.org/licenses/gpl-3.0.txt */
 
 /* Introduction. */
-/* Implementations of most of the functions in xv-x64.h; see also xv-x64.s for the */
-/* assembly-language syscall intercept. */
+/* Implementations of most of the functions in xv-x64.h; see also xv-x64-hook.s */
+/* for the assembly-language syscall intercept. */
 
 #include "xv-x64.h"
 
-#include <errno.h>
-#include <string.h>
-#include <unistd.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 
@@ -214,16 +211,21 @@ int xv_x64_reallocate_ibuffer(xv_x64_ibuffer *const buf,
   ssize_t const page_size = getpagesize();
   ssize_t const rounded   = size + page_size - 1 & ~(page_size - 1);
 
+  int errno;
+
   if (buf->capacity == rounded) return 0;
-  if (buf->start && munmap(buf->start, buf->capacity)) return errno;
+  if (buf->start &&
+      (errno = xv_syscall2(__NR_munmap, buf->start, buf->capacity)))
+    return errno;
 
   if (size > 0) {
-    void *const region = mmap(NULL,
-                              rounded,
-                              PROT_READ | PROT_WRITE | PROT_EXEC,
-                              MAP_PRIVATE | MAP_ANONYMOUS,
-                              -1,
-                              0);
+    void *const region = xv_syscall6(__NR_mmap,
+                                     NULL,
+                                     rounded,
+                                     PROT_READ | PROT_WRITE | PROT_EXEC,
+                                     MAP_PRIVATE | MAP_ANONYMOUS,
+                                     -1,
+                                     0);
 
     if (region == (void *const) -1) return errno;
 

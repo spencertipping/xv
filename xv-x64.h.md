@@ -20,6 +20,7 @@ interpreted in 64-bit mode, not 32-bit compatibility mode.
 ```h
 #include <stdint.h>
 #include <sys/types.h>
+#include <sys/unistd.h>
 ```
 
 ```h
@@ -37,6 +38,50 @@ forward_struct(xv_x64_insn)
 
 ```h
 #undef forward_struct
+```
+
+# System interface
+
+xv isn't linked to the C library because it relocates itself at runtime. As a
+result, we need to write some assembly to make system calls.
+
+```h
+typedef int64_t xv_register;
+static inline xv_register xv_syscall6(
+    xv_register const n,
+    xv_register const arg0, xv_register const arg1, xv_register const arg2,
+    xv_register const arg3, xv_register const arg4, xv_register const arg5) {
+  xv_register result;
+  asm ("movq %3, %%r10;"
+       "movq %4, %%r8;"
+       "movq %5, %%r9;"
+       "syscall;"
+     : "=a"(result)
+     : "a"(n), "D"(arg0), "S"(arg1), "d"(arg2), "r"(arg3), "r"(arg4), "r"(arg5)
+     : "%r10", "%r8", "%r9", "%rcx", "%r11");
+  return result;
+}
+```
+
+```h
+#define xv_syscall5(n, arg0, arg1, arg2, arg3, arg4) \
+  xv_syscall6((n), (arg0), (arg1), (arg2), (arg3), (arg4), 0)
+```
+
+```h
+#define xv_syscall4(n, arg0, arg1, arg2, arg3) \
+  xv_syscall5((n), (arg0), (arg1), (arg2), (arg3), 0)
+```
+
+```h
+#define xv_syscall3(n, arg0, arg1, arg2) \
+  xv_syscall4((n), (arg0), (arg1), (arg2), 0)
+```
+
+```h
+#define xv_syscall2(n, arg0, arg1) xv_syscall3((n), (arg0), (arg1), 0)
+#define xv_syscall1(n, arg0)       xv_syscall2((n), (arg0), 0)
+#define xv_syscall0(n)             xv_syscall1((n), 0)
 ```
 
 # Rewriting strategy

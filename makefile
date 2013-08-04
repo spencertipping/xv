@@ -1,4 +1,4 @@
-XV_CC_OPTS := -Wall -Wno-parentheses -Wno-unused-value -std=gnu99 -static
+XV_CC_OPTS := -Wall -Wno-parentheses -Wno-unused-value -std=gnu99
 XV_OBJ     := build/xv-x64.o
 XV_BIN     := build/xv
 XV_TEST    := test/disasm test/disasm.bin
@@ -13,11 +13,15 @@ build/%.$(1): %.$(1).sdoc
 	chmod -w $$@
 endef
 
-all: $(XV_TEST) $(XV_BIN) $(XV_DOC)
+all: $(XV_DOC) real
 doc: $(XV_DOC)
 
+.PHONY: debug real
 debug: XV_CC_OPTS += -DXV_DEBUG_X64 -g
 debug: $(XV_TEST) $(XV_BIN)
+
+real: XV_CC_OPTS += -nostdlib
+real: $(XV_PRODTEST) $(XV_BIN)
 
 test/%: test/%.c $(XV_OBJ)
 	$(CC) $(CC_OPTS) $(XV_CC_OPTS) $< $(XV_OBJ) -o $@
@@ -36,8 +40,8 @@ $(foreach ext,$(SDOC_EXTS),$(eval $(call sdoc_unwrap,$(ext))))
 build/xv-x64.c: build/xv-x64.h
 build/xv-x64.h: build/xv.h
 
-build/xv: build/xv.x $(XV_OBJ)
-	$(LD) $(LD_OPTS) -T build/xv.x -o $@ $(XV_OBJ)
+build/xv: build/xv.x build/xv.o $(XV_OBJ)
+	$(LD) $(LD_OPTS) -T build/xv.x -o $@ build/xv.o
 
 .PHONY: clean
 clean:
