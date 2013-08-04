@@ -1,3 +1,4 @@
+#include "../build/xv.h"
 #include "../build/xv-x64.h"
 
 #include <fcntl.h>

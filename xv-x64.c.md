@@ -1,4 +1,4 @@
-XV instruction stream rewriter: x86-64
+XV instruction stream rewriter: x86-64 Linux
 Copyright (C) 2013, Spencer Tipping
 Released under the terms of the GPLv3: http://www.gnu.org/licenses/gpl-3.0.txt
 
@@ -8,16 +8,18 @@ Implementations of most of the functions in xv-x64.h; see also xv-x64-hook.s
 for the assembly-language syscall intercept.
 
 ```c
-#include "xv-x64.h"
-```
-
-```c
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 ```
 
 ```c
+#include "xv-x64.h"
+```
+
+```c
 #if XV_DEBUG_X64
+#include <string.h>
 #include <stdio.h>
 #define xv_x64_trace xv_trace
 #else
@@ -268,39 +270,34 @@ because it will think it couldn't free memory. You can free an ibuffer by
 reallocating it to size 0.
 
 ```c
+#define PAGESIZE 4096
 int xv_x64_reallocate_ibuffer(xv_x64_ibuffer *const buf,
                               ssize_t         const size) {
-  ssize_t const page_size = getpagesize();
-  ssize_t const rounded   = size + page_size - 1 & ~(page_size - 1);
+  ssize_t const rounded = size + PAGESIZE - 1 & ~(PAGESIZE - 1);
 ```
 
 ```c
   int errno;
-```
-
-```c
   if (buf->capacity == rounded) return 0;
   if (buf->start &&
-      (errno = xv_syscall2(__NR_munmap, buf->start, buf->capacity)))
-    return errno;
+      (errno = xv_syscall2(__NR_munmap, (xv_register) buf->start,
+                                        buf->capacity)))
+    return -errno;
 ```
 
 ```c
   if (size > 0) {
-    void *const region = xv_syscall6(__NR_mmap,
-                                     NULL,
-                                     rounded,
-                                     PROT_READ | PROT_WRITE | PROT_EXEC,
-                                     MAP_PRIVATE | MAP_ANONYMOUS,
-                                     -1,
-                                     0);
+    void *const region = (void*) xv_syscall6(__NR_mmap,
+                                             (xv_register) NULL,
+                                             rounded,
+                                             PROT_READ | PROT_WRITE | PROT_EXEC,
+                                             MAP_PRIVATE | MAP_ANONYMOUS,
+                                             -1,
+                                             0);
 ```
 
 ```c
-    if (region == (void *const) -1) return errno;
-```
-
-```c
+    if (region == (void *const) -1) return 1;
     buf->current  = buf->start = region;
     buf->capacity = rounded;
   } else {
@@ -930,6 +927,10 @@ the ModR/M and SIB stuff by hand (or figure out which REX and VEX bits should
 extend the register arguments).
 
 ```c
+#if XV_DEBUG_X64
+```
+
+```c
 /* If chars is negative, interpret the number as a signed quantity. */
 static inline int print_hex(char    *const buf,
                             int64_t        x,
@@ -1094,6 +1095,10 @@ int xv_x64_print_insn(char              *const buf,
   memcpy(buf, stage, index);
   return index;
 }
+```
+
+```c
+#endif  /* XV_DEBUG_X64 */
 ```
 
 # Instruction rewriter

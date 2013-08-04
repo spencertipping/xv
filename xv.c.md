@@ -18,10 +18,8 @@ rewrites system calls, replacing them with calls into libxv functions.
 ```
 
 ```c
-int main(int argc, char **argv) {
-```
-
-```c
+void xv_start() {
+  /* TODO */
 }
 
 ```

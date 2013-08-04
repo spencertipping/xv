@@ -16,7 +16,6 @@ we implicitly have a copying garbage collector, a fact that we use to clean out
 the translation cache.
 
 ```x
-INPUT(build/xv-x64.o)
 ENTRY(xv_start)
 SECTIONS
 {

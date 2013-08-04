@@ -8,6 +8,9 @@ This file provides all definitions relevant to instruction stream rewriting for
 x86-64 instructions. It assumes that the instruction stream is being
 interpreted in 64-bit mode, not 32-bit compatibility mode.
 
+TODO: A lot of stuff in this file has Linux dependencies, not just x64. This
+separation should be reflected in the code at some point.
+
 ```h
 #ifndef XV_X64_H
 #define XV_X64_H
@@ -252,6 +255,10 @@ struct xv_x64_insn {
 ```
 
 ```h
+xv_static_assert(!(sizeof(xv_x64_insn) & 0x07))
+```
+
+```h
 /* xv_x64_insn register values */
 #define XV_RAX 0
 #define XV_RCX 1
@@ -343,6 +350,7 @@ int xv_x64_write_insn(xv_x64_ibuffer    *buf,
 ```
 
 ```h
+#if XV_DEBUG_X64
 /* Print human-readable representation of the instruction to the given buffer.
  * Note that we don't encode the mnemonic of the opcode; we mainly just decode
  * the prefixes and operands. Returns the number of characters written to the
@@ -350,6 +358,7 @@ int xv_x64_write_insn(xv_x64_ibuffer    *buf,
 int xv_x64_print_insn(char              *buf,
                       unsigned           size,
                       xv_x64_insn const *insn);
+#endif
 ```
 
 ```h

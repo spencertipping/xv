@@ -12,6 +12,6 @@ rewrites system calls, replacing them with calls into libxv functions.
 #include "xv.h"
 #include "xv-x64.h"
 
-int main(int argc, char **argv) {
-  
+void xv_start() {
+  /* TODO */
 }
