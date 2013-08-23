@@ -32,9 +32,15 @@ discarded each time xv moves (since the translated code might contain
 
 #endif
 
-Footnotes.
-| [1] It can't be done after the fact by catching segfaults. The reason is that
-      we would need to maintain a list of previous locations of xv, which would
-      require space proportional to the number of relocations; since we could
-      relocate any number of times, this becomes a separate GC problem in
-      itself and therefore requires us to parse the stack.
+Footnote 1.
+It can't be done after the fact by catching segfaults. The reason is that we
+would need to maintain a list of previous locations of xv, which would require
+space proportional to the number of relocations; since we could relocate any
+number of times, this becomes a separate GC problem in itself and therefore
+requires us to parse the stack.
+
+After relocating, the translation cache will be empty; so we won't have
+addresses for most of the code that the stack refers to. We fix this by
+rewriting the stack addresses to point to the original code, which will cause
+segfaults when those returns happen. This triggers code rewriting, and
+everything continues normally from there.

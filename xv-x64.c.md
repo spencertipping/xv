@@ -297,7 +297,7 @@ int xv_x64_reallocate_ibuffer(xv_x64_ibuffer *const buf,
 ```
 
 ```c
-    if (region == (void *const) -1) return 1;
+    if (region <= (void*) -1 && region > (void*) -4096) return -(int)region;
     buf->current  = buf->start = region;
     buf->capacity = rounded;
   } else {
